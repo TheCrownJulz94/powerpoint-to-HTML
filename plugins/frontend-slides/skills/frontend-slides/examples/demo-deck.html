@@ -415,7 +415,7 @@ h2 { font-size: 104px; margin-top: 28px; }
 (function () {
   'use strict';
 
-  var W = 1920, H = 1080, RAIL_W = 232;
+  var W = 1920, H = 1080, RAIL_W = 128;
   var TEXT_SEL = 'h1,h2,h3,h4,h5,h6,p,li,blockquote,figcaption,td,th,dt,dd,label,.editable';
   var params = new URLSearchParams(location.search);
   var EMBED = params.has('fs-embed');           // presenter-view preview frames
@@ -648,31 +648,33 @@ h2 { font-size: 104px; margin-top: 28px; }
     /* Slides rail (L), autoplay (A), theme switcher (T) */
     '.fs-rail{position:fixed;left:0;top:0;bottom:0;width:' + RAIL_W + 'px;z-index:9100;display:flex;flex-direction:column;background:#0f0f12;color:#e8e8ea;border-right:1px solid #24242a;transform:translateX(-100%);visibility:hidden;transition:transform .3s cubic-bezier(.16,1,.3,1),visibility 0s .3s}',
     '.fs-rail-on .fs-rail{transform:none;visibility:visible;transition:transform .3s cubic-bezier(.16,1,.3,1)}',
-    '.fs-rail-head{padding:12px;border-bottom:1px solid #24242a;display:flex;flex-direction:column;gap:10px}',
-    '.fs-rail-row{display:flex;gap:6px;align-items:center}',
-    '.fs-rbtn{font:inherit;color:inherit;background:#1d1d22;border:1px solid #2c2c33;border-radius:8px;height:32px;min-width:32px;padding:0 9px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:6px}',
+    '.fs-rail-head{padding:8px;border-bottom:1px solid #24242a;display:flex;flex-direction:column;gap:7px;font-size:12px}',
+    '.fs-rail-row{display:flex;gap:4px;align-items:center}',
+    '.fs-rbtn{font:inherit;color:inherit;background:#1d1d22;border:1px solid #2c2c33;border-radius:7px;height:28px;min-width:28px;padding:0 7px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:5px}',
     '.fs-rbtn:hover{background:#2a2a31}',
     '.fs-rbtn:focus-visible,.fs-rail select:focus-visible{outline:2px solid #e8e8ea;outline-offset:1px}',
     '.fs-rbtn[aria-pressed="true"]{background:#e8e8ea;border-color:#e8e8ea;color:#111}',
-    '.fs-rail select{font:inherit;color:inherit;background:#1d1d22;border:1px solid #2c2c33;border-radius:8px;height:32px;padding:0 6px;cursor:pointer}',
-    '.fs-rail-close{margin-left:auto}',
+    '.fs-rail select{font:inherit;color:inherit;background:#1d1d22;border:1px solid #2c2c33;border-radius:7px;height:28px;padding:0 4px;cursor:pointer;flex:1;min-width:0}',
+    '.fs-rail-loop{flex:1}',
     '.fs-autobar{height:2px;background:#24242a;border-radius:2px;overflow:hidden;display:none}',
     '.fs-autoplaying .fs-autobar{display:block}',
     '.fs-autobar i{display:block;height:100%;width:0;background:#e8e8ea}',
-    '.fs-lbl{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:#8a8a92}',
-    '.fs-themes{display:flex;gap:6px}',
-    '.fs-theme-btn{flex:1;flex-direction:column;height:auto;padding:6px 4px;font-size:11px;gap:5px}',
+    '.fs-lbl{font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:#8a8a92}',
+    '.fs-themes{display:flex;gap:4px}',
+    '.fs-theme-btn{flex:1;min-width:0;height:24px;padding:3px}',
     '.fs-theme-btn[aria-pressed="true"]{background:#2a2a31;border-color:#e8e8ea;color:#fff}',
-    '.fs-sw{display:flex;width:100%;height:16px;border-radius:4px;overflow:hidden;border:1px solid rgba(255,255,255,.15)}',
+    '.fs-sw{display:flex;width:100%;height:100%;border-radius:4px;overflow:hidden;border:1px solid rgba(255,255,255,.15)}',
     '.fs-sw i{flex:1}.fs-sw i:last-child{flex:.45}',
-    '.fs-custom{display:none;gap:8px}',
+    '.fs-custom{display:none;flex-direction:column;gap:5px}',
     '.fs-theme-custom .fs-custom{display:flex}',
-    '.fs-custom label{flex:1;display:flex;align-items:center;gap:6px;font-size:12px;color:#aaa;cursor:pointer}',
-    '.fs-custom input{width:30px;height:26px;padding:0;border:1px solid #2c2c33;border-radius:6px;background:none;cursor:pointer}',
-    '.fs-rail-list{flex:1;overflow-y:auto;padding:12px 12px 24px;display:flex;flex-direction:column;gap:12px;overscroll-behavior:contain}',
-    '.fs-rail-list .fs-thumb{display:flex;gap:8px;align-items:flex-start;outline:none!important}',
-    '.fs-rail-num{width:18px;flex:none;text-align:right;color:#8a8a92;font-variant-numeric:tabular-nums;padding-top:2px}',
-    '.fs-rail-list .fs-thumb-frame{flex:1;outline:2px solid transparent;outline-offset:2px;transition:outline-color .15s}',
+    '.fs-custom label{display:flex;align-items:center;gap:6px;font-size:11px;color:#aaa;cursor:pointer}',
+    '.fs-custom input{width:26px;height:20px;flex:none;padding:0;border:1px solid #2c2c33;border-radius:5px;background:none;cursor:pointer}',
+    /* Tiny thumbnails; the list scrolls by wheel, trackpad, touch and keyboard with no visible scrollbar */
+    '.fs-rail-list{flex:1;overflow-y:auto;padding:8px 8px 16px;display:flex;flex-direction:column;gap:8px;overscroll-behavior:contain;scrollbar-width:none;-ms-overflow-style:none}',
+    '.fs-rail-list::-webkit-scrollbar{display:none}',
+    '.fs-rail-list .fs-thumb{display:flex;gap:4px;align-items:flex-start;outline:none!important}',
+    '.fs-rail-num{width:12px;flex:none;text-align:right;font-size:10px;line-height:1;color:#8a8a92;font-variant-numeric:tabular-nums}',
+    '.fs-rail-list .fs-thumb-frame{flex:1;min-width:0;outline:2px solid transparent;outline-offset:1px;border-radius:2px;transition:outline-color .15s}',
     '.fs-rail-list .fs-thumb:hover .fs-thumb-frame{outline-color:#55555e}',
     '.fs-rail-list .fs-thumb.fs-sel .fs-thumb-frame{outline-color:#e8e8ea}',
     '.fs-rail-list .fs-thumb.fs-sel .fs-rail-num{color:#e8e8ea}',
@@ -984,18 +986,20 @@ h2 { font-size: 104px; margin-top: 28px; }
           '<select data-a="interval" title="Seconds per step" aria-label="Seconds per step">' +
             secs.map(function (s) { return '<option value="' + s + '">' + s + 's</option>'; }).join('') +
           '</select>' +
-          '<button class="fs-rbtn" data-a="loop" aria-pressed="false" title="Loop back to the start">Loop</button>' +
-          '<button class="fs-rbtn fs-rail-close" data-a="close" title="Hide slides panel (L)" aria-label="Hide slides panel">«</button>' +
+        '</div>' +
+        '<div class="fs-rail-row">' +
+          '<button class="fs-rbtn fs-rail-loop" data-a="loop" aria-pressed="false" title="Loop back to the start">Loop</button>' +
+          '<button class="fs-rbtn" data-a="close" title="Hide slides panel (L)" aria-label="Hide slides panel">«</button>' +
         '</div>' +
         '<div class="fs-autobar"><i></i></div>' +
         (this.themable ?
           '<div class="fs-lbl">Theme</div>' +
           '<div class="fs-themes">' + Object.keys(THEMES).map(function (id) {
-            return '<button class="fs-rbtn fs-theme-btn" data-theme="' + id + '" aria-pressed="false"><span class="fs-sw"></span>' + THEMES[id].name + '</button>';
+            return '<button class="fs-rbtn fs-theme-btn" data-theme="' + id + '" aria-pressed="false" title="' + THEMES[id].name + '" aria-label="' + THEMES[id].name + ' theme"><span class="fs-sw"></span></button>';
           }).join('') + '</div>' +
           '<div class="fs-custom">' +
-            '<label>Background <input type="color" data-c="bg"></label>' +
-            '<label>Accent <input type="color" data-c="accent"></label>' +
+            '<label><input type="color" data-c="bg">Background</label>' +
+            '<label><input type="color" data-c="accent">Accent</label>' +
           '</div>' : '') +
       '</div>' +
       '<div class="fs-rail-list"></div>';
