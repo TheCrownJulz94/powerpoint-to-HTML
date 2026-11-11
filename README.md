@@ -4,23 +4,19 @@
 
 A coding-agent skill for creating stunning HTML presentations — from scratch or by converting PowerPoint files. It is packaged as a Claude Code plugin, and the core `SKILL.md` can also be read by other coding agents with filesystem and shell access.
 
-## 📺 Watch the Walkthrough & Tutorial
+## Try It in Your Browser
 
-New here? This beginner-friendly video walks you through the whole thing, start to finish.
+GitHub shows `.html` files as code, so clicking them here won't open the tool. To use it:
 
-<a href="https://www.youtube.com/watch?v=372Iksaz8b0" title="Frontend Slides — walkthrough & tutorial (beginner-friendly)">
-  <img src="https://img.youtube.com/vi/372Iksaz8b0/maxresdefault.jpg" alt="Watch the Frontend Slides walkthrough and tutorial on YouTube" width="100%" />
-</a>
+1. Click the green **Code** button above → **Download ZIP**, then unzip it (or `git clone` the repo).
+2. In the unzipped folder, double-click **`pptx-converter.html`**. It opens in your web browser (Chrome, Safari, Edge or Firefox).
+3. Drop a `.pptx` onto the page and click **Download .html**.
 
-> ▶️ **[Watch on YouTube →](https://www.youtube.com/watch?v=372Iksaz8b0)** (beginner-friendly walkthrough and tutorial)
+Double-click **`examples/demo-deck.html`** to see a finished deck. Press **L** for the slides panel, **T** to change theme, and **?** for all shortcuts.
 
 ## What This Does
 
 **Frontend Slides** helps non-designers create beautiful web presentations without knowing CSS or JavaScript. It uses a "show, don't tell" approach: instead of asking you to describe your aesthetic preferences in words, it generates visual previews and lets you pick what you like.
-
-Here is a deck about the skill, made through the skill:
-
-https://github.com/user-attachments/assets/ef57333e-f879-432a-afb9-180388982478
 
 ### Key Features
 
@@ -172,7 +168,7 @@ The skill will:
 3. Let you pick a visual style
 4. Generate an HTML presentation with all your original assets
 
-**No agent needed:** open [`pptx-converter.html`](pptx-converter.html) in Chrome, Edge, Safari or Firefox, drop the `.pptx`, choose a starting theme, and download the deck. Use the skill instead when you want a fully redesigned deck rather than a faithful conversion.
+**No agent needed:** download the repo, double-click [`pptx-converter.html`](pptx-converter.html) to open it in your browser (see [Try It in Your Browser](#try-it-in-your-browser)), drop the `.pptx`, choose a starting theme, and download the deck. Use the skill instead when you want a fully redesigned deck rather than a faithful conversion.
 
 ## Included Styles
 
