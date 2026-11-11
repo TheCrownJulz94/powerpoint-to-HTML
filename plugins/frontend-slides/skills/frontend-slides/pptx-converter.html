@@ -1504,6 +1504,8 @@ svg {
   .check { display: flex; gap: 10px; align-items: flex-start; margin: 2px 0 10px; cursor: pointer; }
   .check input { margin-top: 4px; accent-color: var(--ink); }
   .check small { display: block; color: var(--ink-2); }
+  .other { margin: -4px 0 12px 26px; }
+  .other textarea { margin-top: 0; min-height: 84px; }
   .go { margin-top: 22px; display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
   .status { color: var(--ink-2); min-width: 0; }
   .status.err { color: var(--err); font-weight: 600; }
@@ -1595,6 +1597,11 @@ svg {
           <span>Reveal points one at a time<small>Bullets and cards appear on each click.</small></span></label>
         <label class="check"><input type="checkbox" id="o-tighten">
           <span>Let Claude tighten wordy slides<small>Meaning and numbers kept; cut detail moves to speaker notes.</small></span></label>
+        <label class="check"><input type="checkbox" id="o-other" aria-controls="otherBox">
+          <span>Other instructions<small>Tell Claude anything else, in your own words.</small></span></label>
+        <div class="other" id="otherBox" hidden>
+          <textarea id="other" maxlength="2000" aria-label="Other instructions for Claude" placeholder="e.g. “Write talking notes for every slide” or “Add a closing slide with our contact details”"></textarea>
+        </div>
         <label class="check"><input type="checkbox" id="o-rail" checked>
           <span>Open the slides panel on start<small>Thumbnails on the left. Toggle with <kbd>L</kbd>.</small></span></label>
         <label class="check"><input type="checkbox" id="o-auto">
@@ -1689,6 +1696,12 @@ svg {
   input.addEventListener('change', function () { if (input.files[0]) handleFile(input.files[0]); input.value = ''; });
   $('style').addEventListener('change', function () { styleHint(); refresh(); });
   $('custom').addEventListener('input', refresh);
+  $('other').addEventListener('input', refresh);
+  $('o-other').addEventListener('change', function () {
+    $('otherBox').hidden = !this.checked;
+    if (this.checked) $('other').focus();
+    refresh();
+  });
   document.querySelectorAll('input[name=density],input[name=motion],#o-tighten').forEach(function (n) { n.addEventListener('change', refresh); });
   $('convert').addEventListener('click', function () { if (MODE === 'claude') runClaude('build', false); else runApi(false); });
   $('fix').addEventListener('click', function () { if (MODE === 'claude') runClaude('fix', false); else runApi(true); });
@@ -2157,6 +2170,8 @@ svg {
       '- Step-by-step reveals: ' + ($('o-reveal').checked ? 'Yes. Use .fragment for bullet lists, cards and chart callouts so they appear one click at a time.' : 'No. Show each slide\'s content at once (entrance animations are still fine).'),
       '- Wording: ' + ($('o-tighten').checked ? 'You may tighten wordy slides. Keep meaning, names and every number; move cut detail into that slide\'s speaker notes.' : 'Keep the original wording exactly. You may restructure it into layouts, but do not rewrite or drop text.')
     ];
+    var other = $('o-other').checked ? $('other').value.trim() : '';
+    if (other) lines.push('- Other instructions, in the user\'s own words (below). Follow them on every slide where they apply. They take priority over the choices above, but not over the fixed 1920×1080 stage or the readability rules. Speaker notes always go in <aside class="notes"> inside the slide.\n<user_instructions>\n' + other + '\n</user_instructions>');
     return { text: lines.join('\n'), extra: extra };
   }
 
