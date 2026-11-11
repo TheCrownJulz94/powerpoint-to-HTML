@@ -1,7 +1,8 @@
+*-check/
+*.log
 .DS_Store
 .claude-design/
-node_modules/
-.vercel/
-*.log
-*-check/
 .frontend-slides/
+.vercel/
+hosted.html
+node_modules/

@@ -6,12 +6,13 @@ A coding-agent skill for creating stunning HTML presentations — from scratch o
 
 ## Try It in Your Browser
 
-GitHub shows `.html` files as code, so clicking them here won't open the tool. To use it:
+**Easiest: [open the converter on claude.ai](https://claude.ai/artifact/PCY6D4bsocXYAQdNinwMUx).** Sign in with your Claude account, drop a `.pptx`, pick a style, and Claude designs the deck. It runs on your own Claude plan; there is no API key to set up. Click **Allow** when Claude asks the first time.
+
+**Or run it from this repo.** GitHub shows `.html` files as code, so clicking them here won't open them:
 
 1. Click the green **Code** button above → **Download ZIP**, then unzip it (or `git clone` the repo).
-2. In the unzipped folder, double-click **`pptx-converter.html`**. It opens in your web browser (Chrome, Safari, Edge or Firefox).
-3. Paste an Anthropic API key (from [console.anthropic.com](https://console.anthropic.com/settings/keys)). Each conversion is billed to it; the button shows an estimate before you start.
-4. Drop a `.pptx`, pick a style, and click **Design my deck with Claude**. Preview it, then click **Download .html**.
+2. Double-click **`pptx-converter.html`** to open it in your browser. Opened this way it needs an Anthropic API key from [console.anthropic.com](https://console.anthropic.com/settings/keys), billed per conversion; the button shows an estimate first.
+3. Drop a `.pptx`, pick a style, and click **Design my deck with Claude**. Preview it, then click **Download .html**.
 
 Double-click **`examples/demo-deck.html`** to see a finished deck. Press **L** for the slides panel, **T** to change theme, and **?** for all shortcuts.
 
@@ -23,7 +24,7 @@ Double-click **`examples/demo-deck.html`** to see a finished deck. Press **L** f
 
 - **Zero Dependencies** — Single HTML files with inline CSS/JS. No npm, no build tools, no frameworks.
 - **Visual Style Discovery** — Can't articulate design preferences? No problem. Pick from generated visual previews.
-- **PPT Conversion** — Claude redesigns existing PowerPoint files as animated web decks, keeping all text, images, charts and notes. Use the skill in Claude Code, or the browser page [`pptx-converter.html`](pptx-converter.html) with an API key.
+- **PPT Conversion** — Claude redesigns existing PowerPoint files as animated web decks, keeping all text, images, charts and notes. Use the skill in Claude Code, or the [converter page on claude.ai](https://claude.ai/artifact/PCY6D4bsocXYAQdNinwMUx) with your Claude account.
 - **Slides Panel + Autoplay** — A thumbnail strip on the left (**L**) to jump between slides, with a play button that flips through steps on a timer.
 - **Theme Switcher** — Every deck can switch between its own colours, **Black & Red**, or a **Custom** palette built from two colours you pick (**T**).
 - **Anti-AI-Slop** — Curated distinctive styles that avoid generic AI aesthetics (bye-bye, purple gradients on white).
@@ -49,7 +50,7 @@ Open [`examples/demo-deck.html`](examples/demo-deck.html) and press `?` to try i
 
 ## What's New in v3.1
 
-- **PowerPoint converter, designed by Claude.** Open [`pptx-converter.html`](pptx-converter.html), paste an Anthropic API key, drop a `.pptx` and pick a style: let Claude choose, keep the PowerPoint's colours, any of the 13 presets or 34 bold templates, or describe your own. The page reads the file locally (text, bullet levels, images, tables, chart data, SmartArt, speaker notes) and sends it to Claude Opus 5.5 together with this skill's `SKILL.md`, `html-template.md`, `animation-patterns.md`, `STYLE_PRESETS.md` and the chosen template, so the deck follows the same design rules as the skill: animated entrances, step-by-step reveals, charts rebuilt as animated SVG. The page then runs the layout audit; **Fix layout issues with Claude** sends any problems back for a corrected version. Your key stays in the browser tab and is sent only to Anthropic. Old `.ppt` files need re-saving as `.pptx` first.
+- **PowerPoint converter, designed by Claude.** Open [`pptx-converter.html`](pptx-converter.html), paste an Anthropic API key, drop a `.pptx` and pick a style: let Claude choose, keep the PowerPoint's colours, any of the 13 presets or 34 bold templates, or describe your own. The page reads the file locally (text, bullet levels, images, tables, chart data, SmartArt, speaker notes) and sends it to Claude Opus 5.5 together with this skill's `SKILL.md`, `html-template.md`, `animation-patterns.md`, `STYLE_PRESETS.md` and the chosen template, so the deck follows the same design rules as the skill: animated entrances, step-by-step reveals, charts rebuilt as animated SVG. The page then runs the layout audit; **Fix layout issues with Claude** sends any problems back for a corrected version. On claude.ai it uses your own Claude account and writes the deck in parts (the design system first, then a few slides per request); opened as a file it uses an Anthropic API key, which stays in the browser tab and is sent only to Anthropic. Old `.ppt` files need re-saving as `.pptx` first.
 - **Slides panel.** Thumbnails down the left edge; click one to jump to it. The stage shrinks to fit beside it. Toggle with **L**; it remembers whether you left it open.
 - **Autoplay.** ▶ in the panel (or **A**) advances one step every 3–30 seconds, optionally looping. Start a kiosk-style loop with `deck.html?autoplay=8` or `data-fs-autoplay="8"` on the stage.
 - **Themes.** **Standard** (the deck's own colours), **Black & Red**, and **Custom**: pick a background and an accent, and the text, muted and surface colours are derived for contrast. **T** cycles through them. The choice is remembered and saved into the file with ⌘S.
@@ -169,7 +170,7 @@ The skill will:
 3. Let you pick a visual style
 4. Generate an HTML presentation with all your original assets
 
-**Without Claude Code:** download the repo, double-click [`pptx-converter.html`](pptx-converter.html) to open it in your browser (see [Try It in Your Browser](#try-it-in-your-browser)), paste an Anthropic API key, drop the `.pptx`, pick a style and let Claude design the deck. It uses the same skill files, but you pick a style from a list instead of from three generated previews.
+**Without Claude Code:** use the [converter on claude.ai](https://claude.ai/artifact/PCY6D4bsocXYAQdNinwMUx) with your Claude account, or download the repo and open [`pptx-converter.html`](pptx-converter.html) with an API key (see [Try It in Your Browser](#try-it-in-your-browser)). Drop the `.pptx`, pick a style and let Claude design the deck. It uses the same skill files, but you pick a style from a list instead of from three generated previews.
 
 ## Included Styles
 
@@ -336,7 +337,11 @@ The repo root is the source of truth. After editing any skill file, mirror it in
 bash scripts/sync-plugin.sh          # copy root → plugins/frontend-slides/skills/frontend-slides
 bash scripts/sync-plugin.sh --check  # CI: fail if the plugin copy is stale
 python3 scripts/inline-runtime.py examples/demo-deck.html   # refresh the demo after runtime changes
+python3 scripts/inline-runtime.py pptx-converter.html       # re-embed runtime + skill files in the converter
+python3 scripts/build-hosted.py hosted.html                 # claude.ai copy of the converter, to republish
 ```
+
+Republish the claude.ai converter from `hosted.html` with the capabilities `{"sample": {"images": true}, "downloads": true}` so it keeps signing visitors in with their Claude account.
 
 ## Requirements
 

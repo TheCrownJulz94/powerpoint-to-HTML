@@ -287,7 +287,7 @@ Output goes to `<deck>-check/`: `slide-NN.png`, `phone.png`, `overview.png` (con
 
 When converting PowerPoint files:
 
-**Browser path:** users without Claude Code can use [pptx-converter.html](pptx-converter.html): they open it in a browser, paste an Anthropic API key, drop the `.pptx` and pick a style from a list; the page sends this skill's files and the extracted content to the Claude API and assembles the deck. It needs `.pptx`, not legacy `.ppt`. In Claude Code, follow the steps below instead.
+**Browser path:** users without Claude Code can use the converter page, hosted at https://claude.ai/artifact/PCY6D4bsocXYAQdNinwMUx (signs in with their Claude account) or opened locally as [pptx-converter.html](pptx-converter.html) (needs an Anthropic API key). They drop the `.pptx` and pick a style from a list; the page sends this skill's files and the extracted content to the Claude API and assembles the deck. It needs `.pptx`, not legacy `.ppt`. In Claude Code, follow the steps below instead.
 
 1. **Extract content** — Run `python scripts/extract-pptx.py <input.pptx> <output_dir>` (install python-pptx if needed: `pip install python-pptx`)
 2. **Confirm with user** — Present extracted slide titles, content summaries, and image counts
