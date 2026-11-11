@@ -1,0 +1,2151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PPTX to Deck · Frontend Slides</title>
+<!--
+  PowerPoint → HTML deck converter. Open this file in a browser, drop a .pptx,
+  download a self-contained Frontend Slides deck. Nothing is uploaded anywhere:
+  the file is unzipped and read in the page itself. No libraries.
+
+  The two text blocks below carry viewport-base.css and deck-runtime.js so they
+  can be written into generated decks. Refresh them after editing either file:
+      python3 scripts/inline-runtime.py pptx-converter.html
+-->
+<script type="text/plain" data-fs-base>
+/* ===========================================
+   FIXED 16:9 STAGE: MANDATORY BASE STYLES
+   Include this ENTIRE file in every presentation.
+   Slides are authored at 1920×1080 and scaled as a whole.
+   =========================================== */
+
+/* 1. Lock the browser viewport */
+html,
+body {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    overflow: hidden;
+    background: var(--stage-bg, #000);
+}
+
+/* 2. Full-window deck viewport */
+.deck-viewport {
+    position: fixed;
+    inset: 0;
+    overflow: hidden;
+    background: var(--stage-bg, #000);
+}
+
+/* 3. Fixed 16:9 design canvas.
+   JavaScript sets transform: translate(...) scale(...). */
+.deck-stage {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 1920px;
+    height: 1080px;
+    overflow: hidden;
+    transform-origin: 0 0;
+    background: var(--slide-bg, #fff);
+}
+
+/* 4. Slides stack inside the fixed stage.
+   Content must be laid out at 1920×1080, not reflowed per device. */
+.slide {
+    position: absolute;
+    inset: 0;
+    width: 1920px;
+    height: 1080px;
+    box-sizing: border-box; /* padding must not push content past 1920×1080 */
+    overflow: hidden;
+    display: block;
+    visibility: hidden;
+    opacity: 0;
+    pointer-events: none;
+    background: var(--slide-bg, #fff);
+}
+
+.slide.active,
+.slide.visible {
+    visibility: visible;
+    opacity: 1;
+    pointer-events: auto;
+    z-index: 1;
+}
+
+/* 5. Keep media inside authored slide bounds */
+img,
+video,
+canvas,
+svg {
+    max-width: 100%;
+    max-height: 100%;
+}
+
+/* 6. Presentation chrome stays outside the slide design system */
+.deck-controls {
+    position: fixed;
+    left: 50%;
+    bottom: 22px;
+    transform: translateX(-50%);
+    z-index: 1000;
+}
+
+/* 7. Print one fixed-size slide per page */
+@media print {
+    html,
+    body {
+        width: 1920px;
+        height: auto;
+        overflow: visible;
+        background: #fff;
+    }
+
+    .deck-viewport {
+        position: static;
+        overflow: visible;
+        background: #fff;
+    }
+
+    .deck-stage {
+        position: static;
+        width: auto;
+        height: auto;
+        transform: none !important;
+        background: none;
+    }
+
+    .slide {
+        position: relative;
+        display: block !important;
+        visibility: visible !important;
+        opacity: 1 !important;
+        pointer-events: auto !important;
+        width: 1920px;
+        height: 1080px;
+        box-sizing: border-box;
+        break-after: page;
+        page-break-after: always;
+    }
+
+    .slide:last-child {
+        break-after: auto;
+        page-break-after: auto;
+    }
+
+    .deck-controls {
+        display: none !important;
+    }
+}
+
+/* 8. Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        transition-duration: 0.2s !important;
+    }
+}
+</script>
+<script type="text/plain" data-fs-runtime>
+/* ===========================================================================
+   FRONTEND SLIDES — DECK RUNTIME  (v3)
+   Inline this ENTIRE file in a <script> tag at the end of <body>.
+   Zero dependencies. Works from file://, a web server, or inside an iframe.
+
+   Markup contract (same as viewport-base.css):
+     <div class="deck-viewport">
+       <main class="deck-stage" id="deckStage">
+         <section class="slide">…
+           <p class="fragment">appears on next keypress</p>
+           <aside class="notes">Speaker notes (hidden on the slide)</aside>
+         </section>
+       </main>
+     </div>
+
+   Keyboard
+     → ↓ Space PgDn Enter   next step / slide      ← ↑ PgUp Backspace  previous
+     Home / End             first / last           12 Enter            jump to slide 12
+     O                      overview grid          P                   presenter view (notes, timer, next)
+     F                      fullscreen             B or .              blackout
+     E                      edit text in place     ⌘/Ctrl+S            download edited .html
+     D                      layout audit overlay   ?                   shortcut help
+     L                      slides panel (left)    A                   autoplay on / off
+     T                      next colour theme      Esc                 close any overlay
+
+   Optional stage attributes:  data-fs-progress="off"  data-fs-counter="off"
+                               data-fs-wheel="off"     data-fs-edit="off"
+                               data-fs-rail="off|closed"  data-fs-themes="off"
+                               data-fs-autoplay="8"    data-fs-loop="off"
+                               data-fs-theme-vars="bg:--paper; surface:--paper-deep; text:--ink; muted:--ink-soft; accent:--accent"
+   URL: ?autoplay=8 starts autoplay (8s per step).
+   <html data-fs-theme="black-red|custom" data-fs-theme-bg="#…" data-fs-theme-accent="#…"> picks the starting theme.
+
+   Public API (window.presentation / window.FrontendSlides):
+     goToSlide(i, step?)  next()  prev()  current  total  showAllFragments()
+     audit() → [{slide, severity, type, message, selector}]
+   Event: document 'slidechange'  detail {index, previousIndex, total, slide, step}
+   =========================================================================== */
+(function () {
+  'use strict';
+
+  var W = 1920, H = 1080, RAIL_W = 232;
+  var TEXT_SEL = 'h1,h2,h3,h4,h5,h6,p,li,blockquote,figcaption,td,th,dt,dd,label,.editable';
+  var params = new URLSearchParams(location.search);
+  var EMBED = params.has('fs-embed');           // presenter-view preview frames
+  var AUTOMATED = !!navigator.webdriver;         // Playwright / export / check scripts
+
+  /* ------------------------------------------------------------------------
+     AUDIT — pure function, usable without initialising the runtime.
+     Checks every slide (hidden slides still have layout, so no navigation).
+     ------------------------------------------------------------------------ */
+  function audit(opts) {
+    opts = opts || {};
+    var minFont = opts.minFontPx || 18;
+    var stage = findStage();
+    if (!stage) return [{ slide: 0, severity: 'error', type: 'structure', message: 'No .deck-stage element found' }];
+    var slides = findSlides(stage);
+    var issues = [];
+    var sRect = stage.getBoundingClientRect();
+    var scale = sRect.width / W || 1;
+    var tol = 2; // stage px
+
+    function push(slideIdx, severity, type, el, message) {
+      issues.push({ slide: slideIdx + 1, severity: severity, type: type, message: message, selector: el ? describe(el) : '', el: el });
+    }
+
+    slides.forEach(function (slide, si) {
+      if (slide.hasAttribute('data-fs-audit-off')) return;
+      if (opts.slide != null && opts.slide !== si) return;
+      var all = Array.prototype.slice.call(slide.querySelectorAll('*')).filter(function (el) {
+        return !el.closest('aside.notes,.speaker-notes,[data-fs-chrome],[aria-hidden="true"]:not(.slide),[data-allow-overflow]') && isRendered(el);
+      });
+
+      // 1. Content clipped by its own box (text cut off inside a card/panel)
+      all.forEach(function (el) {
+        var cs = getComputedStyle(el);
+        if (cs.overflow === 'visible' && cs.overflowX === 'visible' && cs.overflowY === 'visible') return;
+        if (!hasText(el)) return;
+        if (el.scrollHeight > el.clientHeight + tol || el.scrollWidth > el.clientWidth + tol) {
+          push(si, 'error', 'overflow', el, 'Content is clipped inside its box (' +
+            Math.round(el.scrollWidth) + '×' + Math.round(el.scrollHeight) + ' content in ' +
+            Math.round(el.clientWidth) + '×' + Math.round(el.clientHeight) + ')');
+        }
+      });
+
+      // 2. Text running outside the 1920×1080 slide
+      var leaves = all.filter(ownsText);
+      leaves.forEach(function (el) {
+        var r = textRect(el); if (!r) return;
+        var l = (r.left - sRect.left) / scale, t = (r.top - sRect.top) / scale;
+        var rr = (r.right - sRect.left) / scale, b = (r.bottom - sRect.top) / scale;
+        if (l < -tol || t < -tol || rr > W + tol || b > H + tol) {
+          push(si, 'error', 'off-slide', el, 'Text extends outside the 1920×1080 slide');
+        }
+      });
+
+      // 2b. Cards / panels that contain text but are cut off by the slide edge
+      all.forEach(function (el) {
+        if (!hasText(el) || !isPanel(el)) return;
+        var r = el.getBoundingClientRect();
+        var l = (r.left - sRect.left) / scale, t = (r.top - sRect.top) / scale;
+        var rr = (r.right - sRect.left) / scale, b = (r.bottom - sRect.top) / scale;
+        if ((rr - l) > W * 0.9 || (b - t) > H * 0.9) return; // full-bleed bands are intentional
+        if (l < -tol || t < -tol || rr > W + tol || b > H + tol) {
+          push(si, 'error', 'panel-clipped', el, 'Panel is cut off by the slide edge (' +
+            Math.round(Math.max(-l, -t, rr - W, b - H)) + 'px outside)');
+        }
+      });
+
+      // 3. Text lines overlapping each other
+      var boxes = leaves.filter(function (el) { return !el.closest('[data-allow-overlap]'); })
+        .map(function (el) { return { el: el, rs: textRects(el) }; })
+        .filter(function (b) { return b.rs.length; });
+      for (var i = 0; i < boxes.length; i++) {
+        for (var j = i + 1; j < boxes.length; j++) {
+          var a = boxes[i], c = boxes[j];
+          if (a.el.contains(c.el) || c.el.contains(a.el)) continue;
+          var hit = a.rs.some(function (ra) {
+            return c.rs.some(function (rc) {
+              var ix = Math.min(ra.right, rc.right) - Math.max(ra.left, rc.left);
+              var iy = Math.min(ra.bottom, rc.bottom) - Math.max(ra.top, rc.top);
+              return ix > 0 && iy > 0 && ix * iy > Math.min(ra.width * ra.height, rc.width * rc.height) * 0.08;
+            });
+          });
+          if (hit) push(si, 'error', 'overlap', a.el, 'Text overlaps "' + snippet(c.el) + '"');
+        }
+      }
+
+      // 4. Text too small to read when projected
+      leaves.forEach(function (el) {
+        var fs = parseFloat(getComputedStyle(el).fontSize);
+        if (fs < minFont) push(si, 'warn', 'small-text', el, 'Font size ' + fs + 'px is below ' + minFont + 'px at 1920×1080');
+      });
+
+      // 5. Broken images
+      slide.querySelectorAll('img').forEach(function (img) {
+        if (img.complete && img.naturalWidth === 0) push(si, 'error', 'broken-image', img, 'Image failed to load: ' + img.getAttribute('src'));
+      });
+
+      // 6. Internal workflow text leaking onto slides
+      var visible = slideText(slide);
+      var leak = visible.match(/\b(preview\.md|design\.md|style option|option [abc]\b|lorem ipsum|placeholder text|TODO|TBD|generated by|wildcard)\b/i);
+      if (leak) push(si, 'warn', 'leak', slide, 'Slide contains workflow/placeholder text: "' + leak[0] + '"');
+
+      // 7. Density: too many words for one slide
+      var words = visible.split(/\s+/).filter(Boolean).length;
+      var maxWords = parseInt(stage.getAttribute('data-fs-max-words') || '120', 10);
+      if (words > maxWords) push(si, 'warn', 'density', slide, words + ' words on one slide (limit ' + maxWords + ') — consider splitting');
+    });
+    return issues.map(function (i) { if (opts.plain) delete i.el; return i; });
+  }
+
+  function isRendered(el) {
+    var cs = getComputedStyle(el);
+    return cs.display !== 'none' && el.getClientRects().length > 0;
+  }
+  function isPanel(el) {
+    var cs = getComputedStyle(el);
+    var bg = cs.backgroundColor !== 'rgba(0, 0, 0, 0)' && cs.backgroundColor !== 'transparent';
+    var border = parseFloat(cs.borderTopWidth) + parseFloat(cs.borderBottomWidth) + parseFloat(cs.borderLeftWidth) + parseFloat(cs.borderRightWidth) > 0;
+    return bg || border || cs.backgroundImage !== 'none' || cs.boxShadow !== 'none';
+  }
+  function ownsText(el) {
+    for (var n = el.firstChild; n; n = n.nextSibling) {
+      if (n.nodeType === 3 && n.nodeValue.trim()) return true;
+    }
+    return false;
+  }
+  function hasText(el) { return (el.textContent || '').trim().length > 0; }
+  function textRect(el) {
+    // Union of the element's own text lines (tighter than the element box)
+    var rs = textRects(el); if (!rs.length) return null;
+    var u = { left: Infinity, top: Infinity, right: -Infinity, bottom: -Infinity };
+    rs.forEach(function (r) { u.left = Math.min(u.left, r.left); u.top = Math.min(u.top, r.top); u.right = Math.max(u.right, r.right); u.bottom = Math.max(u.bottom, r.bottom); });
+    u.width = u.right - u.left; u.height = u.bottom - u.top;
+    return u;
+  }
+  function textRects(el) {
+    // Per-line rects of the element's own text nodes, trimmed vertically to
+    // roughly the glyph height. A font's content box is ~1.2-1.3x its size, so
+    // tight display type (line-height < 1) would otherwise "overlap" neighbours.
+    var range = document.createRange(), out = [];
+    var fs = parseFloat(getComputedStyle(el).fontSize) || 16;
+    var scale = (findStage().getBoundingClientRect().width / W) || 1;
+    var glyph = fs * 0.92 * scale;
+    for (var n = el.firstChild; n; n = n.nextSibling) {
+      if (n.nodeType !== 3 || !n.nodeValue.trim()) continue;
+      range.selectNodeContents(n);
+      Array.prototype.forEach.call(range.getClientRects(), function (r) {
+        if (!r.width || !r.height) return;
+        var inset = Math.max(0, (r.height - glyph) / 2);
+        out.push({ left: r.left, right: r.right, top: r.top + inset, bottom: r.bottom - inset, width: r.width, height: r.height - 2 * inset });
+      });
+    }
+    return out;
+  }
+  function slideText(slide) {
+    var clone = slide.cloneNode(true);
+    clone.querySelectorAll('aside.notes,.speaker-notes,script,style,[aria-hidden="true"]').forEach(function (n) { n.remove(); });
+    return (clone.textContent || '').replace(/\s+/g, ' ').trim();
+  }
+  function snippet(el) { var t = (el.textContent || '').trim().replace(/\s+/g, ' '); return t.length > 40 ? t.slice(0, 40) + '…' : t; }
+  function describe(el) {
+    if (el.classList && el.classList.contains('slide')) return 'section.slide';
+    var s = el.tagName.toLowerCase();
+    if (el.id) return s + '#' + el.id;
+    var cls = Array.prototype.filter.call(el.classList || [], function (c) { return c.indexOf('fs-') !== 0; });
+    if (cls.length) s += '.' + cls.slice(0, 2).join('.');
+    return s + ' "' + snippet(el) + '"';
+  }
+  function findStage() { return document.getElementById('deckStage') || document.querySelector('.deck-stage'); }
+  function findSlides(stage) {
+    return Array.prototype.filter.call(stage.querySelectorAll('.slide'), function (s) {
+      return !s.parentElement.closest('.slide');
+    });
+  }
+
+  /* ------------------------------------------------------------------------
+     RUNTIME CHROME STYLES — injected, namespaced with fs-, never saved.
+     ------------------------------------------------------------------------ */
+  var CSS = [
+    '.slide aside.notes,.slide .speaker-notes{display:none!important}',
+    '.fragment{opacity:0;transform:translateY(16px);transition:opacity .45s cubic-bezier(.16,1,.3,1),transform .45s cubic-bezier(.16,1,.3,1)}',
+    '.fragment.fs-shown{opacity:1;transform:none}',
+    '.fragment.fade-only{transform:none}',
+    '.fragment.highlight.fs-shown{background:var(--accent-glow,rgba(255,220,0,.35));border-radius:.15em}',
+    '[data-fs-chrome]{font:500 13px/1.4 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;letter-spacing:.01em;box-sizing:border-box}',
+    '[data-fs-chrome] *{box-sizing:border-box}',
+    '.fs-progress{position:fixed;left:0;top:0;height:3px;width:0;background:var(--accent,#fff);z-index:9000;transition:width .35s cubic-bezier(.16,1,.3,1);pointer-events:none}',
+    '.fs-counter{position:fixed;right:18px;bottom:14px;z-index:9000;color:#fff;background:rgba(0,0,0,.55);backdrop-filter:blur(6px);padding:5px 10px;border-radius:999px;font-variant-numeric:tabular-nums;opacity:0;transition:opacity .3s;pointer-events:none}',
+    '.fs-idle-off .fs-counter{opacity:.9}',
+    '.fs-toast{position:fixed;left:50%;bottom:28px;transform:translate(-50%,20px);z-index:9600;background:#111;color:#fff;padding:10px 16px;border-radius:10px;box-shadow:0 10px 30px rgba(0,0,0,.35);opacity:0;transition:opacity .25s,transform .25s;pointer-events:none;max-width:80vw}',
+    '.fs-toast.fs-on{opacity:1;transform:translate(-50%,0)}',
+    '.fs-blackout{position:fixed;inset:0;background:#000;z-index:9400;display:none}',
+    '.fs-blackout.fs-on{display:block}',
+    '.fs-layer{position:fixed;inset:0;z-index:9500;display:none;color:#eee;background:rgba(10,10,12,.97);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);overflow:auto}',
+    '.fs-layer.fs-on{display:block}',
+    '.fs-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:22px;padding:32px}',
+    '.fs-thumb{cursor:pointer;border-radius:8px;outline:2px solid transparent;outline-offset:4px;transition:outline-color .15s}',
+    '.fs-thumb.fs-sel,.fs-thumb:hover{outline-color:var(--accent,#fff)}',
+    '.fs-thumb-frame{position:relative;width:100%;aspect-ratio:16/9;overflow:hidden;border-radius:6px;background:var(--slide-bg,#fff)}',
+    '.fs-thumb-frame>.deck-stage{position:absolute!important;left:0;top:0;transform-origin:0 0;pointer-events:none}',
+    '.fs-thumb-cap{margin-top:8px;opacity:.7;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+    '.fs-help{max-width:560px;margin:10vh auto;padding:28px 32px;background:#16161a;border-radius:14px;box-shadow:0 20px 60px rgba(0,0,0,.5)}',
+    '.fs-help h2{font-size:18px;margin:0 0 16px}',
+    '.fs-help table{width:100%;border-collapse:collapse}',
+    '.fs-help td{padding:6px 0;border-bottom:1px solid #2a2a30;vertical-align:top}',
+    '.fs-help td:first-child{width:42%;color:#aaa}',
+    '.fs-help kbd{display:inline-block;min-width:1.6em;padding:1px 6px;border-radius:5px;background:#2a2a30;border:1px solid #3a3a42;font:inherit;text-align:center}',
+    '.fs-edit-bar{position:fixed;left:14px;top:14px;z-index:9300;display:none;gap:6px;align-items:center;background:#111;color:#fff;padding:6px;border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.35)}',
+    '.fs-editing .fs-edit-bar{display:flex}',
+    '.fs-edit-bar span{padding:0 8px;opacity:.8}',
+    '.fs-edit-bar button{font:inherit;color:inherit;background:#26262c;border:0;border-radius:8px;padding:6px 10px;cursor:pointer}',
+    '.fs-edit-bar button:hover{background:#3a3a42}',
+    '.fs-edit-hot{position:fixed;left:0;top:0;width:72px;height:72px;z-index:9200}',
+    '.fs-edit-btn{position:fixed;left:14px;top:14px;z-index:9250;width:40px;height:40px;border-radius:50%;border:0;background:#111;color:#fff;font-size:18px;cursor:pointer;opacity:0;pointer-events:none;transition:opacity .25s;box-shadow:0 6px 18px rgba(0,0,0,.3)}',
+    '.fs-edit-btn.fs-on{opacity:1;pointer-events:auto}',
+    '.fs-editing .fs-edit-btn{display:none}',
+    '.fs-editing [contenteditable="true"]{outline:1px dashed rgba(127,127,127,.55);outline-offset:4px;cursor:text}',
+    '.fs-editing [contenteditable="true"]:focus{outline:2px solid var(--accent,#3b82f6)}',
+    '.fs-editing .fragment{opacity:1!important;transform:none!important}',
+    '.fs-audit-mark{outline:3px solid #ff3b30!important;outline-offset:2px;background-color:rgba(255,59,48,.08)!important}',
+    '.fs-audit-mark.fs-warn{outline-color:#ff9f0a!important;background-color:rgba(255,159,10,.08)!important}',
+    '.fs-audit-panel{position:fixed;right:14px;top:14px;z-index:9550;width:380px;max-height:70vh;overflow:auto;background:#111;color:#eee;border-radius:12px;padding:14px 16px;box-shadow:0 12px 40px rgba(0,0,0,.45);display:none}',
+    '.fs-auditing .fs-audit-panel{display:block}',
+    '.fs-audit-panel h3{margin:0 0 8px;font-size:14px}',
+    '.fs-audit-panel li{margin:6px 0;list-style:none;padding-left:14px;position:relative}',
+    '.fs-audit-panel li:before{content:"";position:absolute;left:0;top:7px;width:7px;height:7px;border-radius:50%;background:#ff3b30}',
+    '.fs-audit-panel li.fs-warn:before{background:#ff9f0a}',
+    '.fs-audit-panel ul{margin:0;padding:0}',
+    '.fs-audit-panel small{opacity:.6}',
+    /* Slides rail (L), autoplay (A), theme switcher (T) */
+    '.fs-rail{position:fixed;left:0;top:0;bottom:0;width:' + RAIL_W + 'px;z-index:9100;display:flex;flex-direction:column;background:#0f0f12;color:#e8e8ea;border-right:1px solid #24242a;transform:translateX(-100%);visibility:hidden;transition:transform .3s cubic-bezier(.16,1,.3,1),visibility 0s .3s}',
+    '.fs-rail-on .fs-rail{transform:none;visibility:visible;transition:transform .3s cubic-bezier(.16,1,.3,1)}',
+    '.fs-rail-head{padding:12px;border-bottom:1px solid #24242a;display:flex;flex-direction:column;gap:10px}',
+    '.fs-rail-row{display:flex;gap:6px;align-items:center}',
+    '.fs-rbtn{font:inherit;color:inherit;background:#1d1d22;border:1px solid #2c2c33;border-radius:8px;height:32px;min-width:32px;padding:0 9px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:6px}',
+    '.fs-rbtn:hover{background:#2a2a31}',
+    '.fs-rbtn:focus-visible,.fs-rail select:focus-visible{outline:2px solid #e8e8ea;outline-offset:1px}',
+    '.fs-rbtn[aria-pressed="true"]{background:#e8e8ea;border-color:#e8e8ea;color:#111}',
+    '.fs-rail select{font:inherit;color:inherit;background:#1d1d22;border:1px solid #2c2c33;border-radius:8px;height:32px;padding:0 6px;cursor:pointer}',
+    '.fs-rail-close{margin-left:auto}',
+    '.fs-autobar{height:2px;background:#24242a;border-radius:2px;overflow:hidden;display:none}',
+    '.fs-autoplaying .fs-autobar{display:block}',
+    '.fs-autobar i{display:block;height:100%;width:0;background:#e8e8ea}',
+    '.fs-lbl{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:#8a8a92}',
+    '.fs-themes{display:flex;gap:6px}',
+    '.fs-theme-btn{flex:1;flex-direction:column;height:auto;padding:6px 4px;font-size:11px;gap:5px}',
+    '.fs-theme-btn[aria-pressed="true"]{background:#2a2a31;border-color:#e8e8ea;color:#fff}',
+    '.fs-sw{display:flex;width:100%;height:16px;border-radius:4px;overflow:hidden;border:1px solid rgba(255,255,255,.15)}',
+    '.fs-sw i{flex:1}.fs-sw i:last-child{flex:.45}',
+    '.fs-custom{display:none;gap:8px}',
+    '.fs-theme-custom .fs-custom{display:flex}',
+    '.fs-custom label{flex:1;display:flex;align-items:center;gap:6px;font-size:12px;color:#aaa;cursor:pointer}',
+    '.fs-custom input{width:30px;height:26px;padding:0;border:1px solid #2c2c33;border-radius:6px;background:none;cursor:pointer}',
+    '.fs-rail-list{flex:1;overflow-y:auto;padding:12px 12px 24px;display:flex;flex-direction:column;gap:12px;overscroll-behavior:contain}',
+    '.fs-rail-list .fs-thumb{display:flex;gap:8px;align-items:flex-start;outline:none!important}',
+    '.fs-rail-num{width:18px;flex:none;text-align:right;color:#8a8a92;font-variant-numeric:tabular-nums;padding-top:2px}',
+    '.fs-rail-list .fs-thumb-frame{flex:1;outline:2px solid transparent;outline-offset:2px;transition:outline-color .15s}',
+    '.fs-rail-list .fs-thumb:hover .fs-thumb-frame{outline-color:#55555e}',
+    '.fs-rail-list .fs-thumb.fs-sel .fs-thumb-frame{outline-color:#e8e8ea}',
+    '.fs-rail-list .fs-thumb.fs-sel .fs-rail-num{color:#e8e8ea}',
+    '.fs-rail-tab{position:fixed;left:10px;top:50%;transform:translateY(-50%);z-index:9100;width:28px;height:56px;border:0;border-radius:8px;background:rgba(0,0,0,.55);color:#fff;cursor:pointer;opacity:0;transition:opacity .3s;font-size:14px}',
+    '.fs-idle-off .fs-rail-tab,.fs-rail-tab:focus-visible{opacity:.85}',
+    '.fs-rail-on .fs-rail-tab{display:none}',
+    '.fs-rail-on .fs-edit-btn,.fs-rail-on .fs-edit-bar{left:' + (RAIL_W + 14) + 'px}',
+    '.fs-rail-on .fs-edit-hot{left:' + RAIL_W + 'px}',
+    '.fs-embed [data-fs-chrome]{display:none!important}',
+    '.fs-automated .fs-progress,.fs-automated .fs-counter,.fs-automated .fs-edit-hot,.fs-automated .fs-edit-btn,.fs-automated .fs-rail,.fs-automated .fs-rail-tab{display:none!important}',
+    '@page{size:1920px 1080px;margin:0}',
+    '@media print{[data-fs-chrome]{display:none!important}.fragment{opacity:1!important;transform:none!important}html,body{print-color-adjust:exact;-webkit-print-color-adjust:exact}',
+    '  *,*::before,*::after{transition:none!important;animation-duration:0s!important;animation-delay:0s!important;animation-iteration-count:1!important}}'
+  ].join('\n');
+
+  /* ------------------------------------------------------------------------
+     RUNTIME
+     ------------------------------------------------------------------------ */
+  function Deck() {
+    this.stage = findStage();
+    if (!this.stage) { console.warn('[frontend-slides] no .deck-stage found'); return; }
+    this.slides = findSlides(this.stage);
+    this.total = this.slides.length;
+    this.current = 0;
+    this.step = 0;
+    this.scale = 1;
+    this.opt = function (name) { return (this.stage.getAttribute('data-fs-' + name) || 'on') !== 'off'; };
+    this.storeKey = 'fs-edits:' + location.pathname;
+    this.signature = hash(this.slides.map(function (s) { return s.innerHTML; }).join('\u0001'));
+
+    this.injectStyles();
+    this.restoreEdits();          // before fragment discovery, so restored markup is used
+    this.collectFragments();
+    this.buildChrome();
+    this.setupTheme();
+    this.setupAutoplay();
+    this.buildRail();
+    this.setupScale();
+    this.setupKeys();
+    this.setupPointer();
+    this.setupPrint();
+    this.setupMessaging();
+
+    var start = this.readHash();
+    this.goToSlide(start.index, start.step, 'init');
+  }
+
+  Deck.prototype.injectStyles = function () {
+    var st = document.createElement('style');
+    st.setAttribute('data-fs-chrome', '');
+    st.textContent = CSS;
+    document.head.appendChild(st);
+    if (EMBED) document.documentElement.classList.add('fs-embed');
+    if (AUTOMATED) document.documentElement.classList.add('fs-automated');
+  };
+
+  /* ---- Fragments (step-by-step builds) ---------------------------------- */
+  Deck.prototype.collectFragments = function () {
+    this.fragments = this.slides.map(function (slide) {
+      var auto = 0, groups = {};
+      slide.querySelectorAll('.fragment').forEach(function (f) {
+        var idx = f.hasAttribute('data-fragment-index') ? parseInt(f.getAttribute('data-fragment-index'), 10) : auto++;
+        (groups[idx] = groups[idx] || []).push(f);
+      });
+      return Object.keys(groups).map(Number).sort(function (a, b) { return a - b; }).map(function (k) { return groups[k]; });
+    });
+  };
+  Deck.prototype.applyFragments = function () {
+    var self = this;
+    this.fragments.forEach(function (groups, si) {
+      var shown = si < self.current ? groups.length : si > self.current ? 0 : self.step;
+      groups.forEach(function (g, gi) {
+        g.forEach(function (f) {
+          f.classList.toggle('fs-shown', gi < shown);
+          f.classList.toggle('fs-current', si === self.current && gi === shown - 1);
+        });
+      });
+    });
+  };
+  Deck.prototype.showAllFragments = function () {
+    this.step = this.fragments[this.current].length;
+    this.applyFragments();
+  };
+
+  /* ---- Navigation -------------------------------------------------------- */
+  Deck.prototype.goToSlide = function (index, step, reason) {
+    if (!this.total) return;
+    var prev = this.current;
+    index = Math.max(0, Math.min(this.total - 1, index | 0));
+    var maxStep = this.fragments[index].length;
+    step = step == null ? 0 : step === 'end' ? maxStep : Math.max(0, Math.min(maxStep, step | 0));
+    var changed = index !== prev || reason === 'init';
+    this.current = index;
+    this.step = step;
+    this.slides.forEach(function (s, i) {
+      s.classList.toggle('active', i === index);
+      s.classList.toggle('visible', i === index);
+      s.setAttribute('aria-hidden', i === index ? 'false' : 'true');
+    });
+    this.applyFragments();
+    this.updateChrome();
+    this.writeHash();
+    this.broadcast();
+    if (changed) {
+      document.dispatchEvent(new CustomEvent('slidechange', {
+        detail: { index: index, previousIndex: reason === 'init' ? -1 : prev, total: this.total, slide: this.slides[index], step: step, reason: reason || 'api' }
+      }));
+    }
+  };
+  Deck.prototype.next = function () {
+    if (this.step < this.fragments[this.current].length) { this.step++; this.applyFragments(); this.updateChrome(); this.writeHash(); this.broadcast(); return; }
+    if (this.current < this.total - 1) this.goToSlide(this.current + 1, 0, 'next');
+  };
+  Deck.prototype.prev = function () {
+    if (this.step > 0) { this.step--; this.applyFragments(); this.updateChrome(); this.writeHash(); this.broadcast(); return; }
+    if (this.current > 0) this.goToSlide(this.current - 1, 'end', 'prev');
+  };
+
+  /* Deep links: #5 or #5.2 (slide 5, step 2), 1-indexed slides */
+  Deck.prototype.readHash = function () {
+    var m = /^#\/?(\d+)(?:\.(\d+))?$/.exec(location.hash);
+    return m ? { index: parseInt(m[1], 10) - 1, step: m[2] ? parseInt(m[2], 10) : 0 } : { index: 0, step: 0 };
+  };
+  Deck.prototype.writeHash = function () {
+    if (EMBED) return;
+    var h = '#' + (this.current + 1) + (this.step ? '.' + this.step : '');
+    if (location.hash !== h) { try { history.replaceState(null, '', h); } catch (e) { /* sandboxed */ } }
+  };
+
+  /* ---- Stage scaling ----------------------------------------------------- */
+  Deck.prototype.setupScale = function () {
+    var self = this;
+    function fit() {
+      var off = self.railOpen() ? RAIL_W : 0;   // the open rail takes the left edge; the stage fits beside it
+      var vw = window.innerWidth - off, vh = window.innerHeight;
+      var f = Math.min(vw / W, vh / H);
+      self.scale = f;
+      self.stage.style.transform = 'translate(' + (off + (vw - W * f) / 2) + 'px,' + (vh - H * f) / 2 + 'px) scale(' + f + ')';
+    }
+    this.fit = fit;
+    fit();
+    window.addEventListener('resize', fit);
+    if (window.visualViewport) window.visualViewport.addEventListener('resize', fit);
+  };
+
+  /* ---- Chrome: progress, counter, overlays ------------------------------ */
+  function el(tag, cls, html) {
+    var n = document.createElement(tag);
+    n.setAttribute('data-fs-chrome', '');
+    if (cls) n.className = cls;
+    if (html != null) n.innerHTML = html;
+    document.body.appendChild(n);
+    return n;
+  }
+  Deck.prototype.buildChrome = function () {
+    var self = this;
+    if (this.opt('progress')) this.progress = el('div', 'fs-progress');
+    if (this.opt('counter')) this.counter = el('div', 'fs-counter');
+    this.toastEl = el('div', 'fs-toast');
+    this.toastEl.setAttribute('role', 'status');
+    this.blackout = el('div', 'fs-blackout');
+    this.overview = el('div', 'fs-layer');
+    this.overview.setAttribute('aria-label', 'Slide overview');
+    this.help = el('div', 'fs-layer', helpHTML());
+    this.help.addEventListener('click', function () { self.closeLayers(); });
+    this.auditPanel = el('div', 'fs-audit-panel');
+    this.live = el('div', '', '');
+    this.live.setAttribute('aria-live', 'polite');
+    this.live.style.cssText = 'position:fixed;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)';
+
+    if (this.opt('edit') && !EMBED) {
+      var hot = el('div', 'fs-edit-hot');
+      var btn = el('button', 'fs-edit-btn', '✎');
+      btn.title = 'Edit text (E)';
+      btn.setAttribute('aria-label', 'Edit text');
+      var t = null;
+      var show = function () { clearTimeout(t); btn.classList.add('fs-on'); };
+      var hide = function () { t = setTimeout(function () { btn.classList.remove('fs-on'); }, 400); };
+      hot.addEventListener('mouseenter', show); hot.addEventListener('mouseleave', hide);
+      btn.addEventListener('mouseenter', show); btn.addEventListener('mouseleave', hide);
+      btn.addEventListener('click', function () { self.toggleEdit(true); });
+      hot.addEventListener('click', function () { self.toggleEdit(true); });
+      this.editBar = el('div', 'fs-edit-bar',
+        '<span>Editing</span><button data-a="save">Save .html (⌘S)</button><button data-a="discard">Discard edits</button><button data-a="done">Done (Esc)</button>');
+      this.editBar.addEventListener('click', function (e) {
+        var a = e.target.getAttribute('data-a');
+        if (a === 'save') self.saveFile();
+        if (a === 'discard') self.discardEdits();
+        if (a === 'done') self.toggleEdit(false);
+      });
+    }
+
+    // Counter fades in on mouse movement, out when idle
+    var idle = null;
+    document.addEventListener('mousemove', function () {
+      document.documentElement.classList.add('fs-idle-off');
+      clearTimeout(idle);
+      idle = setTimeout(function () { document.documentElement.classList.remove('fs-idle-off'); }, 1800);
+    });
+  };
+  Deck.prototype.updateChrome = function () {
+    var steps = this.fragments[this.current].length;
+    var frac = this.total > 1 ? (this.current + (steps ? this.step / (steps + 1) : 0)) / (this.total - 1) : 1;
+    if (this.progress) this.progress.style.width = (Math.min(1, frac) * 100) + '%';
+    if (this.counter) this.counter.textContent = (this.current + 1) + ' / ' + this.total;
+    if (this.live) this.live.textContent = 'Slide ' + (this.current + 1) + ' of ' + this.total;
+    if (document.documentElement.classList.contains('fs-auditing')) this.renderAudit();
+    if (this.presenter) this.presenter.update();
+    if (this.railList) {
+      var cur = this.current;
+      Array.prototype.forEach.call(this.railList.children, function (c, i) {
+        c.classList.toggle('fs-sel', i === cur);
+        if (i === cur) c.setAttribute('aria-current', 'true'); else c.removeAttribute('aria-current');
+      });
+      var sel = this.railList.children[cur];
+      if (sel && this.railOpen()) sel.scrollIntoView({ block: 'nearest' });
+    }
+    if (this.autoOn) this.armAuto();
+  };
+  Deck.prototype.toast = function (msg, ms) {
+    var t = this.toastEl;
+    t.textContent = msg; t.classList.add('fs-on');
+    clearTimeout(this._toastT);
+    this._toastT = setTimeout(function () { t.classList.remove('fs-on'); }, ms || 2600);
+  };
+  Deck.prototype.layerOpen = function () {
+    return this.overview.classList.contains('fs-on') || this.help.classList.contains('fs-on');
+  };
+  Deck.prototype.closeLayers = function () {
+    this.overview.classList.remove('fs-on');
+    this.overview.innerHTML = '';   // drop thumbnail clones (duplicate DOM, media)
+    this.help.classList.remove('fs-on');
+    this.blackout.classList.remove('fs-on');
+  };
+
+  /* ---- Overview grid (O) ------------------------------------------------- */
+  Deck.prototype.toggleOverview = function () {
+    var ov = this.overview, self = this;
+    if (ov.classList.contains('fs-on')) { this.closeLayers(); return; }
+    this.help.classList.remove('fs-on');
+    ov.innerHTML = '';
+    var grid = document.createElement('div');
+    grid.className = 'fs-grid';
+    ov.appendChild(grid);
+    this.slides.forEach(function (slide, i) {
+      var cell = self.makeThumb(slide, i);
+      var cap = document.createElement('div');
+      cap.className = 'fs-thumb-cap';
+      cap.textContent = (i + 1) + '  ' + slideTitle(slide);
+      cell.appendChild(cap);
+      cell.addEventListener('click', function () { self.closeLayers(); self.goToSlide(i, 0, 'overview'); });
+      grid.appendChild(cell);
+    });
+    ov.classList.add('fs-on');
+    var fitThumbs = function () {
+      grid.querySelectorAll('.fs-thumb-frame').forEach(function (f) {
+        f.firstChild.style.transform = 'scale(' + f.clientWidth / W + ')';
+      });
+    };
+    fitThumbs();
+    this._ovSel = this.current;
+    var sel = grid.children[this.current];
+    if (sel) sel.scrollIntoView({ block: 'center' });
+  };
+  /* A static, scaled-down copy of one slide (used by the overview and the rail). */
+  Deck.prototype.makeThumb = function (slide, i) {
+    var cell = document.createElement('div');
+    cell.className = 'fs-thumb' + (i === this.current ? ' fs-sel' : '');
+    cell.tabIndex = 0;
+    var frame = document.createElement('div');
+    frame.className = 'fs-thumb-frame';
+    var stage = document.createElement('div');
+    stage.className = this.stage.className;   // keep `.deck-stage …` selectors working
+    stage.style.background = 'var(--slide-bg,' + getComputedStyle(this.stage).backgroundColor + ')';
+    var clone = cleanClone(slide);
+    clone.classList.add('active', 'visible');
+    clone.removeAttribute('aria-hidden');
+    clone.querySelectorAll('.fragment').forEach(function (f) { f.classList.add('fs-shown'); });
+    clone.querySelectorAll('[id]').forEach(function (n) { n.removeAttribute('id'); });
+    clone.querySelectorAll('video,audio').forEach(function (m) { m.removeAttribute('autoplay'); m.preload = 'none'; });
+    clone.querySelectorAll('iframe').forEach(function (f) { f.removeAttribute('src'); f.removeAttribute('srcdoc'); });
+    stage.appendChild(clone);
+    frame.appendChild(stage);
+    cell.appendChild(frame);
+    return cell;
+  };
+  function slideTitle(slide) {
+    var h = slide.querySelector('h1,h2,h3');
+    return slide.getAttribute('data-title') || (h ? h.textContent.trim().replace(/\s+/g, ' ') : '');
+  }
+
+  /* ---- Slides rail (L) ----------------------------------------------------
+     A thumbnail strip on the left with autoplay and theme controls on top.
+     Stage attribute data-fs-rail="off" removes it, "closed" starts it hidden. */
+  Deck.prototype.railOpen = function () {
+    return !!this.rail && document.documentElement.classList.contains('fs-rail-on');
+  };
+  Deck.prototype.buildRail = function () {
+    if (EMBED || AUTOMATED || !this.opt('rail')) return;
+    var self = this;
+    var rail = this.rail = el('nav', 'fs-rail');
+    rail.setAttribute('aria-label', 'Slides');
+    var secs = [3, 5, 8, 10, 15, 30];
+    if (secs.indexOf(this.autoSec) < 0) { secs.push(this.autoSec); secs.sort(function (a, b) { return a - b; }); }
+    rail.innerHTML =
+      '<div class="fs-rail-head">' +
+        '<div class="fs-rail-row">' +
+          '<button class="fs-rbtn" data-a="play" aria-pressed="false" title="Autoplay (A)">▶</button>' +
+          '<select data-a="interval" title="Seconds per step" aria-label="Seconds per step">' +
+            secs.map(function (s) { return '<option value="' + s + '">' + s + 's</option>'; }).join('') +
+          '</select>' +
+          '<button class="fs-rbtn" data-a="loop" aria-pressed="false" title="Loop back to the start">Loop</button>' +
+          '<button class="fs-rbtn fs-rail-close" data-a="close" title="Hide slides panel (L)" aria-label="Hide slides panel">«</button>' +
+        '</div>' +
+        '<div class="fs-autobar"><i></i></div>' +
+        (this.themable ?
+          '<div class="fs-lbl">Theme</div>' +
+          '<div class="fs-themes">' + Object.keys(THEMES).map(function (id) {
+            return '<button class="fs-rbtn fs-theme-btn" data-theme="' + id + '" aria-pressed="false"><span class="fs-sw"></span>' + THEMES[id].name + '</button>';
+          }).join('') + '</div>' +
+          '<div class="fs-custom">' +
+            '<label>Background <input type="color" data-c="bg"></label>' +
+            '<label>Accent <input type="color" data-c="accent"></label>' +
+          '</div>' : '') +
+      '</div>' +
+      '<div class="fs-rail-list"></div>';
+    this.railList = rail.querySelector('.fs-rail-list');
+    this.railTab = el('button', 'fs-rail-tab', '»');
+    this.railTab.title = 'Show slides panel (L)';
+    this.railTab.setAttribute('aria-label', 'Show slides panel');
+    this.railTab.addEventListener('click', function () { self.toggleRail(true); });
+
+    var sel = rail.querySelector('select');
+    sel.value = String(this.autoSec);
+    sel.addEventListener('change', function () { self.autoSec = parseFloat(sel.value); self.savePlayPrefs(); if (self.autoOn) self.armAuto(); });
+    rail.addEventListener('click', function (e) {
+      var b = e.target.closest('button');
+      if (!b) return;
+      var a = b.getAttribute('data-a'), th = b.getAttribute('data-theme');
+      if (a === 'play') self.setAutoplay(!self.autoOn);
+      if (a === 'loop') { self.autoLoop = !self.autoLoop; self.savePlayPrefs(); self.syncRail(); }
+      if (a === 'close') self.toggleRail(false);
+      if (th) self.setTheme(th);
+      b.blur();   // keep Space / Enter for slide navigation
+    });
+    rail.querySelectorAll('input[type=color]').forEach(function (inp) {
+      inp.addEventListener('input', function () {
+        var c = self.customColors || {};
+        c[inp.getAttribute('data-c')] = inp.value;
+        self.setTheme('custom', c, true);
+      });
+    });
+    this.railList.addEventListener('click', function (e) {
+      var t = e.target.closest('.fs-thumb');
+      if (t) self.goToSlide(Array.prototype.indexOf.call(self.railList.children, t), 0, 'rail');
+    });
+    this.railList.addEventListener('keydown', function (e) {
+      var t = e.target.closest('.fs-thumb');
+      if (t && (e.key === 'Enter' || e.key === ' ')) {
+        e.preventDefault(); e.stopPropagation();
+        self.goToSlide(Array.prototype.indexOf.call(self.railList.children, t), 0, 'rail');
+      }
+    });
+
+    var pref = null;
+    try { pref = localStorage.getItem('fs-rail'); } catch (e) { /* ignore */ }
+    var open = pref ? pref === 'open' : this.stage.getAttribute('data-fs-rail') !== 'closed' && window.innerWidth >= 900;
+    if (open) this.toggleRail(true, true);
+    this.syncRail();
+  };
+  Deck.prototype.renderRail = function () {
+    if (!this.railList) return;
+    var self = this, list = this.railList;
+    list.innerHTML = '';
+    this.slides.forEach(function (slide, i) {
+      var cell = self.makeThumb(slide, i);
+      cell.setAttribute('role', 'button');
+      cell.setAttribute('aria-label', 'Slide ' + (i + 1) + (slideTitle(slide) ? ': ' + slideTitle(slide) : ''));
+      var num = document.createElement('div');
+      num.className = 'fs-rail-num';
+      num.textContent = i + 1;
+      cell.insertBefore(num, cell.firstChild);
+      list.appendChild(cell);
+    });
+    this._railDirty = false;
+    var w = list.querySelector('.fs-thumb-frame');
+    var f = w ? w.clientWidth / W : 0;
+    list.querySelectorAll('.fs-thumb-frame').forEach(function (fr) { fr.firstChild.style.transform = 'scale(' + f + ')'; });
+    this.updateChrome();
+  };
+  Deck.prototype.toggleRail = function (force, quiet) {
+    if (!this.rail) return;
+    var on = force == null ? !this.railOpen() : force;
+    document.documentElement.classList.toggle('fs-rail-on', on);
+    if (on && (this._railDirty !== false || !this.railList.children.length)) this.renderRail();
+    if (!quiet) { try { localStorage.setItem('fs-rail', on ? 'open' : 'closed'); } catch (e) { /* ignore */ } }
+    if (this.fit) this.fit();
+  };
+  Deck.prototype.syncRail = function () {
+    if (!this.rail) return;
+    var r = this.rail, self = this;
+    var play = r.querySelector('[data-a=play]');
+    play.setAttribute('aria-pressed', String(!!this.autoOn));
+    play.textContent = this.autoOn ? '❚❚' : '▶';
+    play.title = this.autoOn ? 'Pause autoplay (A)' : 'Autoplay (A)';
+    r.querySelector('[data-a=loop]').setAttribute('aria-pressed', String(!!this.autoLoop));
+    r.querySelector('select').value = String(this.autoSec);
+    r.classList.toggle('fs-theme-custom', this.theme === 'custom');
+    r.querySelectorAll('[data-theme]').forEach(function (b) {
+      var id = b.getAttribute('data-theme');
+      b.setAttribute('aria-pressed', String(id === self.theme));
+      var p = id === 'standard' ? self.standardPal : id === 'custom' ? deriveTheme((self.customColors || {}).bg || CUSTOM_DEFAULT.bg, (self.customColors || {}).accent || CUSTOM_DEFAULT.accent) : THEMES[id];
+      if (p) b.firstChild.innerHTML = '<i style="background:' + p.bg + '"></i><i style="background:' + p.accent + '"></i>';
+    });
+    var c = this.customColors || CUSTOM_DEFAULT;
+    r.querySelectorAll('input[type=color]').forEach(function (inp) {
+      var v = c[inp.getAttribute('data-c')] || CUSTOM_DEFAULT[inp.getAttribute('data-c')];
+      if (document.activeElement !== inp) inp.value = v;
+    });
+  };
+
+  /* ---- Autoplay (A) -------------------------------------------------------
+     Advances one step every N seconds. Start it automatically with
+     ?autoplay=8 in the URL or data-fs-autoplay="8" on the stage;
+     data-fs-loop="off" stops at the last slide instead of looping. */
+  Deck.prototype.setupAutoplay = function () {
+    var prefs = null;
+    try { prefs = JSON.parse(localStorage.getItem('fs-autoplay') || 'null'); } catch (e) { /* ignore */ }
+    var q = params.get('autoplay'), a = this.stage.getAttribute('data-fs-autoplay');
+    var secs = parseFloat(q) || parseFloat(a) || (prefs && prefs.sec) || 5;
+    this.autoSec = Math.max(1, Math.min(600, secs));
+    var loopAttr = this.stage.getAttribute('data-fs-loop');
+    this.autoLoop = loopAttr ? loopAttr !== 'off' : prefs ? !!prefs.loop : true;
+    this.autoOn = false;
+    if ((q !== null || a) && !EMBED && !AUTOMATED) this.setAutoplay(true, true);
+  };
+  Deck.prototype.savePlayPrefs = function () {
+    try { localStorage.setItem('fs-autoplay', JSON.stringify({ sec: this.autoSec, loop: this.autoLoop })); } catch (e) { /* ignore */ }
+  };
+  Deck.prototype.setAutoplay = function (on, quiet) {
+    if (EMBED || AUTOMATED) return;
+    this.autoOn = on;
+    document.documentElement.classList.toggle('fs-autoplaying', on);
+    clearTimeout(this.autoT);
+    if (on) this.armAuto();
+    this.syncRail();
+    if (!quiet) this.toast(on ? 'Autoplay on: next step every ' + this.autoSec + 's (A to pause)' : 'Autoplay paused');
+  };
+  Deck.prototype.armAuto = function () {
+    var self = this;
+    clearTimeout(this.autoT);
+    var bar = this.rail && this.rail.querySelector('.fs-autobar i');
+    if (bar) {
+      bar.style.transition = 'none'; bar.style.width = '0';
+      void bar.offsetWidth;
+      bar.style.transition = 'width ' + this.autoSec + 's linear'; bar.style.width = '100%';
+    }
+    this.autoT = setTimeout(function () { self.autoTick(); }, this.autoSec * 1000);
+  };
+  Deck.prototype.autoTick = function () {
+    if (!this.autoOn) return;
+    if (this.editing || this.layerOpen() || this.blackout.classList.contains('fs-on')) { this.armAuto(); return; }
+    var atEnd = this.current === this.total - 1 && this.step >= this.fragments[this.current].length;
+    if (!atEnd) { this.next(); return; }
+    if (this.autoLoop) this.goToSlide(0, 0, 'autoplay');
+    else this.setAutoplay(false);
+  };
+
+  /* ---- Themes (T) ---------------------------------------------------------
+     Standard = the deck's own colours. Other themes override the deck's colour
+     variables, which the stage maps to roles:
+       data-fs-theme-vars="bg:--paper; surface:--paper-deep; text:--ink; muted:--ink-soft; accent:--accent"
+     Without the attribute the html-template.md names are used. The choice is
+     remembered per deck and written into the file on ⌘S as data-fs-theme on <html>. */
+  Deck.prototype.setupTheme = function () {
+    var self = this;
+    this.themeVars = {};
+    (this.stage.getAttribute('data-fs-theme-vars') || DEFAULT_THEME_VARS).split(';').forEach(function (pair) {
+      var kv = pair.split(':');
+      if (kv.length !== 2) return;
+      var role = kv[0].trim(), name = kv[1].trim();
+      if (THEME_ROLES.indexOf(role) >= 0 && /^--[\w-]+$/.test(name)) self.themeVars[role] = name;
+    });
+    var cs = getComputedStyle(document.documentElement);
+    var read = function (role) { var n = self.themeVars[role]; return n ? toHex(cs.getPropertyValue(n).trim()) : null; };
+    this.themable = this.opt('themes') && !!(read('bg') && read('text') && read('accent'));
+    this.theme = 'standard';
+    if (!this.themable) return;
+    this.standardPal = { bg: read('bg'), text: read('text'), accent: read('accent') };
+    this.themeStyle = document.createElement('style');
+    this.themeStyle.setAttribute('data-fs-chrome', '');
+    document.head.appendChild(this.themeStyle);
+    this.themeKey = 'fs-theme:' + location.pathname;
+    var root = document.documentElement, saved = null;
+    try { saved = JSON.parse(localStorage.getItem(this.themeKey) || 'null'); } catch (e) { /* ignore */ }
+    var init = saved || { id: root.getAttribute('data-fs-theme') || 'standard', bg: root.getAttribute('data-fs-theme-bg'), accent: root.getAttribute('data-fs-theme-accent') };
+    this.setTheme(init.id, init, true, !saved);
+  };
+  Deck.prototype.setTheme = function (id, colors, quiet, noStore) {
+    if (!this.themable) { if (!quiet) this.toast('This deck has no theme colour variables to switch'); return; }
+    if (!THEMES[id]) id = 'standard';
+    var pal = null, root = document.documentElement;
+    if (id === 'custom') {
+      var c = colors || this.customColors || {};
+      this.customColors = { bg: toHex(c.bg) || CUSTOM_DEFAULT.bg, accent: toHex(c.accent) || CUSTOM_DEFAULT.accent };
+      pal = deriveTheme(this.customColors.bg, this.customColors.accent);
+    } else if (id !== 'standard') {
+      pal = THEMES[id];
+    }
+    this.theme = id;
+    var css = '';
+    if (pal) {
+      var v = this.themeVars, decl = [];
+      THEME_ROLES.forEach(function (r) { if (v[r] && pal[r]) decl.push(v[r] + ':' + pal[r] + '!important'); });
+      if (!v.surface) decl.push('--surface:' + pal.surface + '!important');
+      decl.push('--slide-bg:' + pal.bg + '!important', '--stage-bg:' + mix(pal.bg, '#000000', 0.6) + '!important',
+        '--accent-glow:' + rgba(pal.accent, 0.3) + '!important');
+      css = 'html:root,html:root body,html:root .deck-stage{' + decl.join(';') + '}';
+    }
+    this.themeStyle.textContent = css;
+    if (id === 'standard') root.removeAttribute('data-fs-theme'); else root.setAttribute('data-fs-theme', id);
+    if (id === 'custom') { root.setAttribute('data-fs-theme-bg', this.customColors.bg); root.setAttribute('data-fs-theme-accent', this.customColors.accent); }
+    else { root.removeAttribute('data-fs-theme-bg'); root.removeAttribute('data-fs-theme-accent'); }
+    if (!noStore) {
+      try { localStorage.setItem(this.themeKey, JSON.stringify({ id: id, bg: (this.customColors || {}).bg, accent: (this.customColors || {}).accent })); } catch (e) { /* ignore */ }
+    }
+    this.syncRail();
+    if (!quiet) this.toast('Theme: ' + THEMES[id].name + (id === 'custom' && !this.railOpen() ? ' (pick colours in the slides panel, L)' : ''));
+  };
+  Deck.prototype.cycleTheme = function () {
+    var ids = Object.keys(THEMES);
+    this.setTheme(ids[(ids.indexOf(this.theme) + 1) % ids.length]);
+  };
+
+  var THEME_ROLES = ['bg', 'surface', 'text', 'muted', 'accent'];
+  var DEFAULT_THEME_VARS = 'bg:--bg-primary; surface:--surface; text:--text-primary; muted:--text-secondary; accent:--accent';
+  var CUSTOM_DEFAULT = { bg: '#0f1b2d', accent: '#f5b301' };
+  var THEMES = {
+    standard: { name: 'Standard' },
+    'black-red': { name: 'Black & Red', bg: '#0b0b0c', surface: '#19191c', text: '#f5f5f4', muted: '#a8a29e', accent: '#e11d2a' },
+    custom: { name: 'Custom' }
+  };
+  /* Build a full palette from two picked colours: text flips for contrast,
+     muted/surface are blends, and an accent too close to the background is pushed toward the text colour. */
+  function deriveTheme(bg, accent) {
+    var dark = luminance(bg) < 0.36;
+    var text = dark ? '#f7f6f3' : '#141414';
+    var acc = contrast(accent, bg) < 2.4 ? mix(accent, text, 0.45) : accent;
+    return { bg: bg, surface: mix(bg, text, dark ? 0.08 : 0.05), text: text, muted: mix(text, bg, 0.38), accent: acc };
+  }
+  function parseHex(h) {
+    var m = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(String(h || '').trim());
+    if (!m) return null;
+    var s = m[1].length === 3 ? m[1].replace(/./g, '$&$&') : m[1];
+    return [parseInt(s.slice(0, 2), 16), parseInt(s.slice(2, 4), 16), parseInt(s.slice(4, 6), 16)];
+  }
+  function toHex(c) {
+    if (!c) return null;
+    var rgb = parseHex(c);
+    if (!rgb) {
+      var m = /^rgba?\(\s*(\d+)[\s,]+(\d+)[\s,]+(\d+)/i.exec(c);
+      if (!m) {   // named colours, hsl(), etc.: let the browser resolve them
+        var probe = document.createElement('span');
+        probe.style.color = c;
+        if (!probe.style.color) return null;
+        document.body.appendChild(probe);
+        m = /^rgba?\(\s*(\d+)[\s,]+(\d+)[\s,]+(\d+)/i.exec(getComputedStyle(probe).color);
+        probe.remove();
+        if (!m) return null;
+      }
+      rgb = [+m[1], +m[2], +m[3]];
+    }
+    return '#' + rgb.map(function (n) { return ('0' + Math.round(n).toString(16)).slice(-2); }).join('');
+  }
+  function mix(a, b, t) {
+    var x = parseHex(a), y = parseHex(b);
+    return '#' + x.map(function (n, i) { return ('0' + Math.round(n + (y[i] - n) * t).toString(16)).slice(-2); }).join('');
+  }
+  function rgba(h, alpha) { var x = parseHex(h); return 'rgba(' + x.join(',') + ',' + alpha + ')'; }
+  function luminance(h) {
+    var x = parseHex(h).map(function (n) { n /= 255; return n <= 0.03928 ? n / 12.92 : Math.pow((n + 0.055) / 1.055, 2.4); });
+    return 0.2126 * x[0] + 0.7152 * x[1] + 0.0722 * x[2];
+  }
+  function contrast(a, b) { var la = luminance(a), lb = luminance(b); return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05); }
+
+  Deck.prototype.moveOverviewSel = function (delta) {
+    var grid = this.overview.firstChild; if (!grid) return;
+    var cols = Math.max(1, Math.round(grid.clientWidth / (grid.children[0].offsetWidth + 22)));
+    if (Math.abs(delta) === 2) delta = delta > 0 ? cols : -cols;
+    this._ovSel = Math.max(0, Math.min(this.total - 1, this._ovSel + delta));
+    Array.prototype.forEach.call(grid.children, function (c, i) { c.classList.toggle('fs-sel', i === this._ovSel); }, this);
+    grid.children[this._ovSel].scrollIntoView({ block: 'nearest' });
+  };
+
+  /* ---- Keyboard ---------------------------------------------------------- */
+  Deck.prototype.setupKeys = function () {
+    if (EMBED) return;
+    var self = this, digits = '', digitT = null;
+    document.addEventListener('keydown', function (e) { self.onKey(e, function (d) {
+      if (d === null) { var n = digits; digits = ''; return n; }
+      digits += d; clearTimeout(digitT); digitT = setTimeout(function () { digits = ''; }, 1500); return null;
+    }, function () { return digits; }); });
+  };
+  Deck.prototype.onKey = function (e, digitBuf, peekDigits) {
+    var k = e.key, self = this;
+    var mod = e.metaKey || e.ctrlKey;
+
+    if (mod && (k === 's' || k === 'S') && this.opt('edit')) { e.preventDefault(); this.saveFile(); return; }
+    if (mod || e.altKey) return;
+
+    var t = e.target;
+    if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) {
+      if (k === 'Escape') { t.blur(); if (this.editing) this.toggleEdit(false); }
+      return;
+    }
+    if (this.editing && k === 'Escape') { this.toggleEdit(false); return; }
+
+    if (this.overview.classList.contains('fs-on')) {
+      var m = { ArrowRight: 1, ArrowLeft: -1, ArrowDown: 2, ArrowUp: -2 }[k];
+      if (m) { e.preventDefault(); this.moveOverviewSel(m); return; }
+      if (k === 'Enter' || k === ' ') { e.preventDefault(); var sel = this._ovSel; this.closeLayers(); this.goToSlide(sel, 0, 'overview'); return; }
+    }
+    if (k === 'Escape') { this.closeLayers(); if (document.documentElement.classList.contains('fs-auditing')) this.toggleAudit(); return; }
+    if (this.help.classList.contains('fs-on') && k !== '?') { this.closeLayers(); return; }
+
+    if (/^[0-9]$/.test(k)) { digitBuf(k); return; }
+    if (k === 'Enter' && peekDigits()) { e.preventDefault(); this.goToSlide(parseInt(digitBuf(null), 10) - 1, 0, 'jump'); return; }
+
+    switch (k) {
+      case 'ArrowRight': case 'ArrowDown': case 'PageDown': case ' ': case 'Enter':
+        if (this.layerOpen()) return;
+        e.preventDefault(); this.blackout.classList.remove('fs-on'); this.next(); break;
+      case 'ArrowLeft': case 'ArrowUp': case 'PageUp': case 'Backspace':
+        if (this.layerOpen()) return;
+        e.preventDefault(); this.blackout.classList.remove('fs-on'); this.prev(); break;
+      case 'Home': e.preventDefault(); this.goToSlide(0, 0, 'keyboard'); break;
+      case 'End': e.preventDefault(); this.goToSlide(this.total - 1, 'end', 'keyboard'); break;
+      case 'o': case 'O': this.toggleOverview(); break;
+      case 'p': case 'P': this.openPresenter(); break;
+      case 'f': case 'F': this.toggleFullscreen(); break;
+      case 'b': case 'B': case '.': this.blackout.classList.toggle('fs-on'); break;
+      case 'e': case 'E': if (this.opt('edit')) this.toggleEdit(); break;
+      case 'd': case 'D': this.toggleAudit(); break;
+      case 'l': case 'L': this.toggleRail(); break;
+      case 'a': case 'A': this.setAutoplay(!this.autoOn); break;
+      case 't': case 'T': this.cycleTheme(); break;
+      case '?': this.overview.classList.remove('fs-on'); this.help.classList.toggle('fs-on'); break;
+    }
+  };
+  Deck.prototype.toggleFullscreen = function () {
+    var d = document;
+    if (d.fullscreenElement || d.webkitFullscreenElement) (d.exitFullscreen || d.webkitExitFullscreen).call(d);
+    else { var r = d.documentElement; (r.requestFullscreen || r.webkitRequestFullscreen).call(r); }
+  };
+
+  /* ---- Wheel + touch ----------------------------------------------------- */
+  Deck.prototype.setupPointer = function () {
+    if (EMBED) return;
+    var self = this;
+    if (this.opt('wheel')) {
+      var acc = 0, lockUntil = 0;
+      window.addEventListener('wheel', function (e) {
+        if (self.layerOpen() || self.editing) return;
+        if (e.target.closest && e.target.closest('[data-fs-chrome]')) return;   // scrolling the rail
+        if (scrollableAncestor(e.target)) return;
+        e.preventDefault();
+        var now = Date.now();
+        if (now < lockUntil) return;
+        acc += Math.abs(e.deltaY) > Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
+        if (Math.abs(acc) > 60) {
+          acc > 0 ? self.next() : self.prev();
+          acc = 0; lockUntil = now + 650;
+        }
+      }, { passive: false });
+    }
+    var sx = 0, sy = 0, st = 0;
+    window.addEventListener('touchstart', function (e) {
+      if (e.touches.length !== 1) return;
+      sx = e.touches[0].clientX; sy = e.touches[0].clientY; st = Date.now();
+    }, { passive: true });
+    window.addEventListener('touchend', function (e) {
+      if (self.layerOpen() || self.editing) return;
+      if (e.target.closest && e.target.closest('[data-fs-chrome]')) return;
+      var t = e.changedTouches[0], dx = t.clientX - sx, dy = t.clientY - sy;
+      if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.2) { dx < 0 ? self.next() : self.prev(); return; }
+      // Quick tap on the left / right edge third (ignoring interactive elements)
+      if (Math.abs(dx) < 10 && Math.abs(dy) < 10 && Date.now() - st < 300 &&
+          !e.target.closest('a,button,input,textarea,select,video,[data-fs-chrome],[onclick]')) {
+        var x = t.clientX / window.innerWidth;
+        if (x > 0.66) self.next(); else if (x < 0.33) self.prev();
+      }
+    }, { passive: true });
+  };
+  function scrollableAncestor(n) {
+    for (; n && n !== document.body && n.nodeType === 1; n = n.parentElement) {
+      if (n.classList.contains('slide')) return false;
+      var cs = getComputedStyle(n);
+      if (/(auto|scroll)/.test(cs.overflowY) && n.scrollHeight > n.clientHeight) return true;
+    }
+    return false;
+  }
+
+  /* ---- Print / Save as PDF ------------------------------------------------
+     viewport-base.css lays every slide out on its own page, but animations
+     keyed on `.slide.visible` would leave non-active slides blank. Mark every
+     slide visible and every fragment shown while printing, then restore. */
+  Deck.prototype.setupPrint = function () {
+    var self = this, saved = null;
+    window.addEventListener('beforeprint', function () {
+      saved = { i: self.current, s: self.step };
+      self.slides.forEach(function (s) { s.classList.add('visible'); });
+      self.stage.querySelectorAll('.fragment').forEach(function (f) { f.classList.add('fs-shown'); });
+    });
+    window.addEventListener('afterprint', function () {
+      if (saved) self.goToSlide(saved.i, saved.s, 'print');
+    });
+  };
+
+  /* ---- Presenter view (P) -------------------------------------------------
+     Opens a same-origin about:blank window we script directly. The current
+     and next-slide previews are iframes of this deck in ?fs-embed mode,
+     driven by postMessage (works from file:// too). */
+  Deck.prototype.setupMessaging = function () {
+    var self = this;
+    window.addEventListener('message', function (e) {
+      var d = e.data;
+      if (!d || d.fs !== 'goto') return;
+      self.goToSlide(d.index, d.step, 'remote');
+    });
+  };
+  Deck.prototype.broadcast = function () { /* hook for presenter sync */ };
+  Deck.prototype.openPresenter = function () {
+    if (EMBED) return;
+    if (this.presenter && !this.presenter.win.closed) { this.presenter.win.focus(); return; }
+    var win = window.open('', 'fs-presenter-' + hash(location.pathname), 'width=1280,height=760');
+    if (!win) { this.toast('Pop-up blocked — allow pop-ups to open presenter view'); return; }
+    var self = this;
+    var base = location.href.split('#')[0];
+    var src = base + (base.indexOf('?') >= 0 ? '&' : '?') + 'fs-embed';
+    var d = win.document;
+    d.open();
+    d.write('<!doctype html><html><head><meta charset="utf-8"><title>Presenter — ' + escapeHTML(document.title) + '</title><style>' + PRESENTER_CSS + '</style></head><body>' +
+      '<div class="cur"><iframe id="cur"></iframe></div>' +
+      '<div class="side"><div class="nextwrap"><div class="lbl">Next</div><div class="next"><iframe id="nxt"></iframe><div id="end" class="end">End of deck</div></div></div>' +
+      '<div class="meta"><div id="pos"></div><div id="timer" title="Click to reset">00:00</div><div id="clock"></div></div>' +
+      '<div class="lbl">Notes</div><div id="notes" class="notes"></div>' +
+      '<div class="keys">←/→ navigate · B blackout · R reset timer · +/- note size</div></div>' +
+      '</body></html>');
+    d.close();
+    var cur = d.getElementById('cur'), nxt = d.getElementById('nxt');
+    cur.src = src; nxt.src = src;
+    var started = Date.now(), fontSize = 22;
+    var p = this.presenter = {
+      win: win,
+      update: function () {
+        if (win.closed) { self.presenter = null; return; }
+        var i = self.current, steps = self.fragments[i].length;
+        post(cur, i, self.step);
+        var hasNextStep = self.step < steps;
+        var ni = hasNextStep ? i : i + 1, ns = hasNextStep ? self.step + 1 : 0;
+        var atEnd = ni >= self.total;
+        nxt.style.visibility = atEnd ? 'hidden' : 'visible';
+        d.getElementById('end').style.display = atEnd ? 'flex' : 'none';
+        if (!atEnd) post(nxt, ni, ns);
+        d.getElementById('pos').textContent = 'Slide ' + (i + 1) + ' / ' + self.total + (steps ? '  ·  step ' + self.step + '/' + steps : '');
+        var notes = self.slides[i].querySelector('aside.notes,.speaker-notes');
+        d.getElementById('notes').innerHTML = notes ? notes.innerHTML : '<em style="opacity:.5">No notes for this slide.</em>';
+      }
+    };
+    function post(frame, index, step) {
+      try { frame.contentWindow.postMessage({ fs: 'goto', index: index, step: step }, '*'); } catch (e) { /* not ready */ }
+    }
+    cur.addEventListener('load', p.update);
+    nxt.addEventListener('load', p.update);
+    var tick = function () {
+      if (win.closed) return;
+      var s = Math.floor((Date.now() - started) / 1000);
+      d.getElementById('timer').textContent = pad(Math.floor(s / 60)) + ':' + pad(s % 60);
+      var now = new Date();
+      d.getElementById('clock').textContent = pad(now.getHours()) + ':' + pad(now.getMinutes());
+      win.setTimeout(tick, 500);
+    };
+    tick();
+    d.getElementById('timer').addEventListener('click', function () { started = Date.now(); });
+    d.addEventListener('keydown', function (e) {
+      if (e.key === 'r' || e.key === 'R') { started = Date.now(); return; }
+      if (e.key === '+' || e.key === '=') { fontSize += 2; d.getElementById('notes').style.fontSize = fontSize + 'px'; return; }
+      if (e.key === '-') { fontSize = Math.max(12, fontSize - 2); d.getElementById('notes').style.fontSize = fontSize + 'px'; return; }
+      if (/^[pPeEoOdDlL?]$/.test(e.key)) return; // audience-window-only shortcuts
+      self.onKey(e, function () { return null; }, function () { return ''; });
+    });
+    p.update();
+  };
+  var PRESENTER_CSS = [
+    '*{box-sizing:border-box}html,body{margin:0;height:100%;background:#0e0e11;color:#e8e8ea;font:15px/1.5 ui-sans-serif,system-ui,-apple-system,sans-serif}',
+    'body{display:grid;grid-template-columns:1.55fr 1fr;gap:18px;padding:18px}',
+    '.cur{position:relative;align-self:start;aspect-ratio:16/9;border-radius:10px;overflow:hidden;background:#000;outline:3px solid #3b82f6}',
+    'iframe{position:absolute;inset:0;width:100%;height:100%;border:0;pointer-events:none}',
+    '.side{display:flex;flex-direction:column;min-height:0;gap:10px}',
+    '.next{position:relative;aspect-ratio:16/9;border-radius:8px;overflow:hidden;background:#000;opacity:.9}',
+    '.end{position:absolute;inset:0;display:none;align-items:center;justify-content:center;color:#888}',
+    '.lbl{font-size:11px;text-transform:uppercase;letter-spacing:.12em;color:#8a8a92;margin-bottom:4px}',
+    '.meta{display:flex;justify-content:space-between;align-items:baseline;padding:8px 0;border-top:1px solid #26262c;border-bottom:1px solid #26262c}',
+    '#timer{font-size:34px;font-weight:600;font-variant-numeric:tabular-nums;cursor:pointer}#clock{color:#8a8a92;font-variant-numeric:tabular-nums}',
+    '.notes{flex:1;overflow:auto;font-size:22px;line-height:1.45;padding-right:6px}.notes p{margin:0 0 .6em}',
+    '.keys{font-size:12px;color:#6a6a72}'
+  ].join('');
+
+  /* ---- Inline editing (E) ----------------------------------------------- */
+  Deck.prototype.toggleEdit = function (force) {
+    var on = force == null ? !this.editing : force;
+    if (on === !!this.editing) return;
+    this.editing = on;
+    var self = this;
+    document.documentElement.classList.toggle('fs-editing', on);
+    this.slides.forEach(function (slide) {
+      slide.querySelectorAll(TEXT_SEL).forEach(function (n) {
+        if (n.closest('aside.notes,.speaker-notes')) return;
+        var parentMatch = n.parentElement && n.parentElement.closest(TEXT_SEL);
+        if (parentMatch && slide.contains(parentMatch)) return; // edit outermost text block only
+        if (on) { n.setAttribute('contenteditable', 'true'); n.setAttribute('spellcheck', 'true'); }
+        else { n.removeAttribute('contenteditable'); n.removeAttribute('spellcheck'); }
+      });
+    });
+    if (on) {
+      if (!this._onInput) {
+        this._onInput = function () { clearTimeout(self._saveT); self._saveT = setTimeout(function () { self.persistEdits(); }, 400); };
+        this.stage.addEventListener('input', this._onInput);
+      }
+      this.toast('Edit mode — click any text. ⌘/Ctrl+S downloads the updated .html');
+    } else {
+      this.persistEdits();
+      this._railDirty = true;
+      if (this.railOpen()) this.renderRail();
+    }
+  };
+  Deck.prototype.persistEdits = function () {
+    try {
+      localStorage.setItem(this.storeKey, JSON.stringify({
+        sig: this.signature,
+        slides: this.slides.map(function (s) { return cleanClone(s).innerHTML; })
+      }));
+    } catch (e) { /* storage unavailable */ }
+  };
+  Deck.prototype.restoreEdits = function () {
+    var raw = null;
+    try { raw = localStorage.getItem(this.storeKey); } catch (e) { return; }
+    if (!raw) return;
+    try {
+      var data = JSON.parse(raw);
+      if (data.sig !== this.signature || data.slides.length !== this.slides.length) return; // file changed since
+      var changed = false;
+      this.slides.forEach(function (s, i) { if (s.innerHTML !== data.slides[i]) { s.innerHTML = data.slides[i]; changed = true; } });
+      if (changed) {
+        var self = this;
+        setTimeout(function () { self.toast('Restored unsaved text edits — press E then "Discard edits" to revert', 4500); }, 400);
+      }
+    } catch (e) { /* corrupt entry */ }
+  };
+  Deck.prototype.discardEdits = function () {
+    try { localStorage.removeItem(this.storeKey); } catch (e) { /* ignore */ }
+    location.reload();
+  };
+  Deck.prototype.saveFile = function () {
+    var self = this;
+    var root = document.documentElement.cloneNode(true);
+    root.querySelectorAll('[data-fs-chrome]').forEach(function (n) { n.remove(); });
+    Array.prototype.slice.call(root.classList).forEach(function (c) { if (c.indexOf('fs-') === 0) root.classList.remove(c); });
+    if (!root.className) root.removeAttribute('class');
+    var stage = root.querySelector('#deckStage') || root.querySelector('.deck-stage');
+    if (stage) stage.style.removeProperty('transform');
+    if (stage && !stage.getAttribute('style')) stage.removeAttribute('style');
+    findSlidesIn(stage).forEach(function (s, i) {
+      cleanNode(s);
+      s.classList.remove('active', 'visible');
+      s.removeAttribute('aria-hidden');
+      if (i === 0) s.classList.add('active');
+      if (!s.className) s.removeAttribute('class');
+    });
+    var html = '<!DOCTYPE html>\n' + root.outerHTML;
+    var name = decodeURIComponent((location.pathname.split('/').pop() || 'presentation.html'));
+    if (!/\.html?$/i.test(name)) name += '.html';
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
+    a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 2000);
+    try { localStorage.removeItem(self.storeKey); } catch (e) { /* ignore */ }
+    this.toast('Downloaded ' + name + ' — replace the original file with it', 4000);
+  };
+  function findSlidesIn(stage) {
+    if (!stage) return [];
+    return Array.prototype.filter.call(stage.querySelectorAll('.slide'), function (s) { return !s.parentElement.closest('.slide'); });
+  }
+  function cleanNode(root) {
+    root.querySelectorAll('[data-fs-chrome]').forEach(function (n) { n.remove(); });
+    [root].concat(Array.prototype.slice.call(root.querySelectorAll('*'))).forEach(function (n) {
+      n.removeAttribute('contenteditable');
+      n.removeAttribute('spellcheck');
+      if (n.classList && n.classList.length) {
+        Array.prototype.slice.call(n.classList).forEach(function (c) { if (c.indexOf('fs-') === 0) n.classList.remove(c); });
+        if (!n.className) n.removeAttribute('class');
+      }
+    });
+    return root;
+  }
+  function cleanClone(slide) { return cleanNode(slide.cloneNode(true)); }
+
+  /* ---- Audit overlay (D) ------------------------------------------------- */
+  Deck.prototype.toggleAudit = function () {
+    var on = document.documentElement.classList.toggle('fs-auditing');
+    if (on) this.renderAudit();
+    else document.querySelectorAll('.fs-audit-mark').forEach(function (n) { n.classList.remove('fs-audit-mark', 'fs-warn'); });
+  };
+  Deck.prototype.renderAudit = function () {
+    document.querySelectorAll('.fs-audit-mark').forEach(function (n) { n.classList.remove('fs-audit-mark', 'fs-warn'); });
+    var all = audit();
+    var here = all.filter(function (i) { return i.slide === this.current + 1; }, this);
+    here.forEach(function (i) {
+      if (i.el && !i.el.classList.contains('slide')) {
+        i.el.classList.add('fs-audit-mark');
+        if (i.severity === 'warn') i.el.classList.add('fs-warn');
+      }
+    });
+    var others = {};
+    all.forEach(function (i) { if (i.slide !== this.current + 1) others[i.slide] = (others[i.slide] || 0) + 1; }, this);
+    var otherList = Object.keys(others).map(function (s) { return s + ' (' + others[s] + ')'; }).join(', ');
+    this.auditPanel.innerHTML = '<h3>Layout audit — slide ' + (this.current + 1) + '</h3>' +
+      (here.length ? '<ul>' + here.map(function (i) {
+        return '<li class="' + (i.severity === 'warn' ? 'fs-warn' : '') + '"><b>' + i.type + '</b> ' + escapeHTML(i.message) + '<br><small>' + escapeHTML(i.selector) + '</small></li>';
+      }).join('') + '</ul>' : '<p>✓ No issues on this slide.</p>') +
+      '<p><small>' + (otherList ? 'Other slides with issues: ' + otherList : 'No issues on other slides.') + ' · D to close</small></p>';
+  };
+
+  /* ---- Helpers ----------------------------------------------------------- */
+  function hash(s) { var h = 5381; for (var i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0; return (h >>> 0).toString(36); }
+  function pad(n) { return (n < 10 ? '0' : '') + n; }
+  function escapeHTML(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+  function helpHTML() {
+    var rows = [
+      ['<kbd>→</kbd> <kbd>Space</kbd>', 'Next step / slide'], ['<kbd>←</kbd>', 'Previous'],
+      ['<kbd>Home</kbd> <kbd>End</kbd>', 'First / last slide'], ['<kbd>1</kbd><kbd>2</kbd> <kbd>Enter</kbd>', 'Jump to slide 12'],
+      ['<kbd>O</kbd>', 'Overview grid'], ['<kbd>P</kbd>', 'Presenter view: notes, timer, next slide'],
+      ['<kbd>F</kbd>', 'Fullscreen'], ['<kbd>B</kbd>', 'Blackout screen'],
+      ['<kbd>E</kbd>', 'Edit text in place'], ['<kbd>⌘</kbd>/<kbd>Ctrl</kbd> <kbd>S</kbd>', 'Download edited .html'],
+      ['<kbd>⌘</kbd>/<kbd>Ctrl</kbd> <kbd>P</kbd>', 'Print / Save as PDF (one slide per page)'],
+      ['<kbd>L</kbd>', 'Slides panel (thumbnails, autoplay, theme)'], ['<kbd>A</kbd>', 'Autoplay on / off'],
+      ['<kbd>T</kbd>', 'Next colour theme'],
+      ['<kbd>D</kbd>', 'Layout audit (overflow, overlap, tiny text)'], ['<kbd>Esc</kbd>', 'Close overlays']
+    ];
+    return '<div class="fs-help"><h2>Keyboard shortcuts</h2><table>' +
+      rows.map(function (r) { return '<tr><td>' + r[0] + '</td><td>' + r[1] + '</td></tr>'; }).join('') + '</table></div>';
+  }
+
+  /* ---- Boot -------------------------------------------------------------- */
+  window.FrontendSlides = { audit: audit, version: '3.1.0' };
+  function boot() {
+    if (window.FS_NO_AUTOINIT) return;
+    var deck = new Deck();
+    if (!deck.stage) return;
+    window.FrontendSlides.deck = deck;
+    var api = {
+      goToSlide: function (i, s) { deck.goToSlide(i, s, 'api'); },
+      next: function () { deck.next(); },
+      prev: function () { deck.prev(); },
+      showAllFragments: function () { deck.showAllFragments(); },
+      audit: audit,
+      get current() { return deck.current; },
+      get total() { return deck.total; },
+      get step() { return deck.step; }
+    };
+    window.FrontendSlides.api = api;
+    if (!window.presentation) window.presentation = api;
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
+  else boot();
+})();
+</script>
+<style>
+  :root {
+    --ink: #17181c; --ink-2: #5b5e69; --line: #e3e1db; --paper: #f6f5f1; --card: #fff;
+    --accent: #e0482a; --ok: #1f8a4c; --warn: #b26a00;
+    --mono: ui-monospace, "SF Mono", Menlo, monospace;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink: #ecebe7; --ink-2: #a3a3ab; --line: #2c2c31; --paper: #121214; --card: #1b1b1f; --ok: #4fc483; --warn: #f0a63a; color-scheme: dark; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--paper); color: var(--ink); font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 40px 20px 80px; }
+  header h1 { font-size: 30px; letter-spacing: -.02em; margin: 0 0 6px; }
+  header p { margin: 0; color: var(--ink-2); max-width: 640px; }
+  .drop { margin-top: 28px; border: 2px dashed var(--line); border-radius: 16px; background: var(--card); padding: 44px 20px; text-align: center; cursor: pointer; transition: border-color .15s, background .15s; }
+  .drop:hover, .drop:focus-visible, .drop.over { border-color: var(--accent); outline: none; }
+  .drop.over { background: color-mix(in srgb, var(--accent) 6%, var(--card)); }
+  .drop strong { display: block; font-size: 19px; margin-bottom: 4px; }
+  .drop span { color: var(--ink-2); }
+  .drop .btn { margin-top: 16px; }
+  .btn { display: inline-flex; align-items: center; gap: 8px; font: inherit; font-weight: 600; border-radius: 10px; padding: 10px 16px; cursor: pointer; border: 1px solid var(--line); background: var(--card); color: var(--ink); text-decoration: none; }
+  .btn:hover { border-color: var(--ink-2); }
+  .btn.primary { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+  .btn:disabled { opacity: .5; cursor: default; }
+  .opts { margin-top: 22px; display: grid; grid-template-columns: 1.4fr 1fr; gap: 16px; }
+  .panel { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; }
+  .panel h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .1em; color: var(--ink-2); margin: 0 0 12px; font-weight: 600; }
+  .themes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .theme { position: relative; border: 1px solid var(--line); border-radius: 12px; padding: 10px; cursor: pointer; display: flex; flex-direction: column; gap: 8px; }
+  .theme:has(input:checked) { border-color: var(--ink); box-shadow: 0 0 0 1px var(--ink); }
+  .theme input { position: absolute; opacity: 0; }
+  .theme:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .sw { height: 34px; border-radius: 7px; display: flex; overflow: hidden; border: 1px solid rgba(127,127,127,.25); }
+  .sw i { flex: 1; } .sw i:last-child { flex: .4; }
+  .theme b { font-size: 14px; } .theme small { color: var(--ink-2); line-height: 1.3; }
+  .custom { display: none; gap: 14px; margin-top: 12px; align-items: center; }
+  .custom.on { display: flex; }
+  .custom label { display: flex; align-items: center; gap: 8px; color: var(--ink-2); }
+  .custom input { width: 38px; height: 30px; padding: 0; border: 1px solid var(--line); border-radius: 6px; background: none; cursor: pointer; }
+  .check { display: flex; gap: 10px; align-items: flex-start; margin: 4px 0 12px; cursor: pointer; }
+  .check input { margin-top: 3px; accent-color: var(--ink); }
+  .check small { display: block; color: var(--ink-2); }
+  .status { margin-top: 22px; min-height: 22px; color: var(--ink-2); }
+  .status.err { color: var(--accent); font-weight: 600; }
+  #result[hidden] { display: none; }
+  #result { margin-top: 8px; }
+  .bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+  .bar .stats { font-weight: 600; }
+  .bar .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  .frame { position: relative; aspect-ratio: 16 / 9; border-radius: 14px; overflow: hidden; background: #000; border: 1px solid var(--line); }
+  .frame iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+  .notes { margin: 14px 0 0; padding: 0; list-style: none; color: var(--ink-2); font-size: 14px; }
+  .notes li { padding-left: 18px; position: relative; margin: 4px 0; }
+  .notes li::before { content: "!"; position: absolute; left: 0; color: var(--warn); font-weight: 700; }
+  .hint { margin-top: 10px; font-size: 13px; color: var(--ink-2); }
+  kbd { font: 12px var(--mono); border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; background: var(--card); }
+  @media (max-width: 760px) {
+    .opts { grid-template-columns: 1fr; }
+    .themes { grid-template-columns: 1fr; }
+    .wrap { padding: 28px 16px 60px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>PowerPoint → HTML deck</h1>
+    <p>Drop a <b>.pptx</b> to turn it into a Frontend Slides deck: one HTML file with a slides panel, autoplay, presenter view and theme switching. Your file stays on this computer.</p>
+  </header>
+
+  <div class="drop" id="drop" tabindex="0" role="button" aria-label="Choose a PowerPoint file">
+    <strong>Drop a .pptx file here</strong>
+    <span>Text, bullet levels, images, tables and speaker notes are carried over.</span><br>
+    <span class="btn">Choose file…</span>
+    <input type="file" id="file" accept=".pptx,.ppt,application/vnd.openxmlformats-officedocument.presentationml.presentation" hidden>
+  </div>
+
+  <div class="opts">
+    <div class="panel">
+      <h2>Starting theme</h2>
+      <div class="themes">
+        <label class="theme"><input type="radio" name="theme" value="standard" checked>
+          <span class="sw" id="sw-standard"><i style="background:#f7f5f0"></i><i style="background:#2f5bea"></i></span>
+          <b>Standard</b><small>Colours from the PowerPoint file</small></label>
+        <label class="theme"><input type="radio" name="theme" value="black-red">
+          <span class="sw"><i style="background:#0b0b0c"></i><i style="background:#e11d2a"></i></span>
+          <b>Black &amp; Red</b><small>Dark, high-contrast</small></label>
+        <label class="theme"><input type="radio" name="theme" value="custom">
+          <span class="sw" id="sw-custom"><i></i><i></i></span>
+          <b>Custom</b><small>Pick two colours</small></label>
+      </div>
+      <div class="custom" id="custom">
+        <label>Background <input type="color" id="c-bg" value="#0f1b2d"></label>
+        <label>Accent <input type="color" id="c-accent" value="#f5b301"></label>
+      </div>
+      <p class="hint">You can switch theme any time inside the deck: press <kbd>T</kbd> or use the slides panel.</p>
+    </div>
+    <div class="panel">
+      <h2>Options</h2>
+      <label class="check"><input type="checkbox" id="o-reveal">
+        <span>Reveal bullets one at a time<small>Each top-level bullet appears on the next click.</small></span></label>
+      <label class="check"><input type="checkbox" id="o-rail" checked>
+        <span>Open the slides panel on start<small>Thumbnails on the left. Toggle with <kbd>L</kbd>.</small></span></label>
+      <label class="check"><input type="checkbox" id="o-auto">
+        <span>Start autoplay<small>Moves on every <select id="o-secs"><option>3</option><option selected>5</option><option>8</option><option>10</option><option>15</option><option>30</option></select> seconds and loops.</small></span></label>
+    </div>
+  </div>
+
+  <div class="status" id="status" role="status" aria-live="polite"></div>
+
+  <section id="result" hidden>
+    <div class="bar">
+      <div class="stats" id="stats"></div>
+      <div class="actions">
+        <a class="btn primary" id="download" download>Download .html</a>
+        <a class="btn" id="open" target="_blank" rel="noopener">Open in new tab</a>
+        <button class="btn" id="again" type="button">Convert another</button>
+      </div>
+    </div>
+    <div class="frame"><iframe id="preview" title="Deck preview"></iframe></div>
+    <ul class="notes" id="notes"></ul>
+  </section>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  var BASE_CSS = document.querySelector('script[data-fs-base]').textContent.trim();
+  var RUNTIME = document.querySelector('script[data-fs-runtime]').textContent.trim();
+  var $ = function (id) { return document.getElementById(id); };
+  var R_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  var FALLBACK_PAL = { bg: '#f7f5f0', text: '#16181d', accent: '#2f5bea' };
+  var parsed = null, outURL = null;
+
+  /* ---------------------------------------------------------------- UI --- */
+  var drop = $('drop'), input = $('file');
+  drop.addEventListener('click', function () { input.click(); });
+  drop.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); } });
+  ['dragenter', 'dragover'].forEach(function (t) { drop.addEventListener(t, function (e) { e.preventDefault(); drop.classList.add('over'); }); });
+  ['dragleave', 'drop'].forEach(function (t) { drop.addEventListener(t, function () { drop.classList.remove('over'); }); });
+  drop.addEventListener('drop', function (e) { e.preventDefault(); if (e.dataTransfer.files[0]) handle(e.dataTransfer.files[0]); });
+  input.addEventListener('change', function () { if (input.files[0]) handle(input.files[0]); input.value = ''; });
+  $('again').addEventListener('click', function () { $('result').hidden = true; status(''); input.click(); });
+  document.querySelectorAll('input[name=theme],#c-bg,#c-accent,#o-reveal,#o-rail,#o-auto,#o-secs').forEach(function (n) {
+    n.addEventListener('input', function () { syncOpts(); if (parsed) render(); });
+  });
+  function syncOpts() {
+    var t = document.querySelector('input[name=theme]:checked').value;
+    $('custom').classList.toggle('on', t === 'custom');
+    var sw = $('sw-custom').children;
+    sw[0].style.background = $('c-bg').value; sw[1].style.background = $('c-accent').value;
+  }
+  syncOpts();
+  if (!BASE_CSS || !RUNTIME) status('This page is missing its runtime. Run: python3 scripts/inline-runtime.py pptx-converter.html', true);
+
+  function status(msg, err) { var s = $('status'); s.textContent = msg; s.classList.toggle('err', !!err); }
+
+  async function handle(file) {
+    $('result').hidden = true;
+    if (!BASE_CSS || !RUNTIME) return;
+    status('Reading ' + file.name + '…');
+    try {
+      var buf = await file.arrayBuffer();
+      var head = new Uint8Array(buf, 0, Math.min(4, buf.byteLength));
+      if (head[0] === 0xD0 && head[1] === 0xCF && head[2] === 0x11 && head[3] === 0xE0) {
+        status('This is an old-format .ppt file. Open it in PowerPoint, Keynote or Google Slides, save it as .pptx, then drop that here.', true);
+        return;
+      }
+      if (head[0] !== 0x50 || head[1] !== 0x4B) { status('That doesn’t look like a PowerPoint file. Please drop a .pptx.', true); return; }
+      parsed = await parsePptx(buf, function (m) { status(m); });
+      parsed.fileName = file.name;
+      $('sw-standard').innerHTML = '<i style="background:' + parsed.palette.bg + '"></i><i style="background:' + parsed.palette.accent + '"></i>';
+      render();
+      status('');
+    } catch (e) {
+      console.error(e);
+      parsed = null;
+      status('Could not convert this file: ' + (e && e.message || e), true);
+    }
+  }
+
+  function render() {
+    var opts = {
+      theme: document.querySelector('input[name=theme]:checked').value,
+      bg: $('c-bg').value, accent: $('c-accent').value,
+      reveal: $('o-reveal').checked, rail: $('o-rail').checked,
+      autoplay: $('o-auto').checked ? $('o-secs').value : null
+    };
+    var html = buildDeck(parsed, opts);
+    if (outURL) URL.revokeObjectURL(outURL);
+    outURL = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
+    var name = parsed.fileName.replace(/\.pptx?$/i, '') + '.html';
+    $('download').href = outURL; $('download').download = name;
+    $('open').href = outURL;
+    $('preview').src = outURL;
+    var n = parsed.slides.length, imgs = parsed.slides.reduce(function (a, s) { return a + s.images.filter(function (m) { return !m.missing; }).length; }, 0);
+    $('stats').textContent = n + ' slide' + (n === 1 ? '' : 's') + ' · ' + imgs + ' image' + (imgs === 1 ? '' : 's') + ' · ' + Math.round(html.length / 1024) + ' KB';
+    $('notes').innerHTML = parsed.warnings.map(function (w) { return '<li>' + esc(w) + '</li>'; }).join('');
+    $('result').hidden = false;
+  }
+
+  /* --------------------------------------------------------------- ZIP --- */
+  async function readZip(buf) {
+    var dv = new DataView(buf), eocd = -1;
+    for (var i = buf.byteLength - 22; i >= Math.max(0, buf.byteLength - 65557); i--) {
+      if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+    }
+    if (eocd < 0) throw new Error('the file is damaged (no zip directory)');
+    var count = dv.getUint16(eocd + 10, true), p = dv.getUint32(eocd + 16, true);
+    var dec = new TextDecoder(), entries = {};
+    for (var n = 0; n < count; n++) {
+      if (dv.getUint32(p, true) !== 0x02014b50) throw new Error('the file is damaged (bad zip entry)');
+      var method = dv.getUint16(p + 10, true), size = dv.getUint32(p + 20, true);
+      var nl = dv.getUint16(p + 28, true), xl = dv.getUint16(p + 30, true), cl = dv.getUint16(p + 32, true);
+      var off = dv.getUint32(p + 42, true);
+      entries[dec.decode(new Uint8Array(buf, p + 46, nl))] = { method: method, size: size, off: off };
+      p += 46 + nl + xl + cl;
+    }
+    return {
+      has: function (name) { return !!entries[name]; },
+      bytes: async function (name) {
+        var e = entries[name];
+        if (!e) return null;
+        var start = e.off + 30 + dv.getUint16(e.off + 26, true) + dv.getUint16(e.off + 28, true);
+        var raw = new Uint8Array(buf, start, e.size);
+        if (e.method === 0) return raw;
+        if (e.method !== 8) throw new Error('unsupported compression in ' + name);
+        var stream = new Blob([raw]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+        return new Uint8Array(await new Response(stream).arrayBuffer());
+      },
+      text: async function (name) { var b = await this.bytes(name); return b ? new TextDecoder().decode(b) : null; }
+    };
+  }
+
+  /* --------------------------------------------------------------- XML --- */
+  function xml(s) { return new DOMParser().parseFromString(s, 'application/xml'); }
+  function kids(el, name) { return el ? Array.prototype.filter.call(el.children, function (c) { return c.localName === name; }) : []; }
+  function kid(el, name) { return kids(el, name)[0] || null; }
+  function desc(el, name) { return el ? Array.prototype.slice.call(el.getElementsByTagNameNS('*', name)) : []; }
+  function rAttr(el, name) { return el ? (el.getAttributeNS(R_NS, name) || el.getAttribute('r:' + name)) : null; }
+  function resolve(base, target) {
+    if (target.charAt(0) === '/') return target.slice(1);
+    var parts = base.split('/'); parts.pop();
+    target.split('/').forEach(function (s) { if (s === '..') parts.pop(); else if (s && s !== '.') parts.push(s); });
+    return parts.join('/');
+  }
+  async function rels(zip, part) {
+    var i = part.lastIndexOf('/');
+    var t = await zip.text(part.slice(0, i) + '/_rels/' + part.slice(i + 1) + '.rels');
+    var out = {};
+    if (!t) return out;
+    desc(xml(t).documentElement, 'Relationship').forEach(function (r) {
+      out[r.getAttribute('Id')] = { type: r.getAttribute('Type') || '', target: r.getAttribute('TargetMode') === 'External' ? null : resolve(part, r.getAttribute('Target')) };
+    });
+    return out;
+  }
+  function relOfType(map, suffix) { for (var k in map) if (map[k].type.slice(-suffix.length) === suffix) return map[k]; return null; }
+
+  /* -------------------------------------------------------------- PPTX --- */
+  async function parsePptx(buf, progress) {
+    var zip = await readZip(buf);
+    var presPart = 'ppt/presentation.xml';
+    var presXml = await zip.text(presPart);
+    if (!presXml) throw new Error('no ppt/presentation.xml inside. Is this a PowerPoint file?');
+    var pres = xml(presXml).documentElement;
+    var presRels = await rels(zip, presPart);
+    var sz = desc(pres, 'sldSz')[0];
+    var size = { cx: sz ? +sz.getAttribute('cx') : 12192000, cy: sz ? +sz.getAttribute('cy') : 6858000 };
+    var warnings = [], tally = { hidden: 0, charts: 0, smartart: 0, vector: 0, media: 0 };
+    var palette = await readPalette(zip, presRels);
+    var imgCache = {};
+
+    var ids = desc(desc(pres, 'sldIdLst')[0], 'sldId');
+    var slides = [];
+    for (var n = 0; n < ids.length; n++) {
+      progress('Reading slide ' + (n + 1) + ' of ' + ids.length + '…');
+      var rel = presRels[rAttr(ids[n], 'id')];
+      if (!rel || !rel.target) continue;
+      var sx = await zip.text(rel.target);
+      if (!sx) continue;
+      var sdoc = xml(sx).documentElement;
+      if (sdoc.getAttribute('show') === '0') { tally.hidden++; continue; }
+      var srels = await rels(zip, rel.target);
+      var s = { title: '', ctr: false, subtitle: null, blocks: [], images: [], tables: [], notes: [], layout: '' };
+      var layoutRel = relOfType(srels, '/slideLayout');
+      if (layoutRel && layoutRel.target) {
+        var lx = await zip.text(layoutRel.target);
+        if (lx) s.layout = xml(lx).documentElement.getAttribute('type') || '';
+      }
+      var tree = desc(sdoc, 'spTree')[0];
+      await walk(tree, s, srels, identity(), zip, size, tally, imgCache);
+
+      s.blocks.sort(function (a, b) { return (a.y - b.y) || (a.x - b.x); });
+      s.images.sort(function (a, b) { return (a.y - b.y) || (a.x - b.x); });
+      // No title placeholder: a short single line at the top reads as the title
+      if (!s.title && s.blocks.length && s.blocks[0].paras.length === 1 && s.blocks[0].paras[0].text.length < 90) {
+        s.title = s.blocks.shift().paras[0].text;
+      }
+      if (s.layout === 'secHead' && s.blocks.length && !s.subtitle) {
+        s.subtitle = [].concat.apply([], s.blocks.map(function (b) { return b.paras; }));
+        s.blocks = [];
+      }
+      var notesRel = relOfType(srels, '/notesSlide');
+      if (notesRel && notesRel.target) {
+        var nx = await zip.text(notesRel.target);
+        if (nx) desc(xml(nx).documentElement, 'sp').forEach(function (sp) {
+          var ph = desc(sp, 'ph')[0];
+          if (!ph || ph.getAttribute('type') !== 'body') return;
+          kids(kid(sp, 'txBody'), 'p').forEach(function (p) { var t = para(p).text.trim(); if (t) s.notes.push(t); });
+        });
+      }
+      slides.push(s);
+    }
+    if (!slides.length) throw new Error('no visible slides found');
+    if (tally.hidden) warnings.push(tally.hidden + ' hidden slide' + plural(tally.hidden) + ' left out.');
+    if (tally.charts) warnings.push(tally.charts + ' chart' + plural(tally.charts) + ' could not be converted. A dashed box marks where each one was. Add a screenshot there.');
+    if (tally.smartart) warnings.push(tally.smartart + ' SmartArt graphic' + plural(tally.smartart) + ' could not be converted. A dashed box marks where each one was.');
+    if (tally.vector) warnings.push(tally.vector + ' EMF/WMF image' + plural(tally.vector) + ' left out (browsers can’t display that format).');
+    if (tally.media) warnings.push(tally.media + ' video/audio clip' + plural(tally.media) + ' replaced by poster image' + plural(tally.media) + '.');
+    return { slides: slides, palette: palette, warnings: warnings };
+  }
+  function plural(n) { return n === 1 ? '' : 's'; }
+
+  /* Group shapes have their own coordinate space; carry an affine map down. */
+  function identity() { return function (x, y, w, h) { return { x: x, y: y, w: w, h: h }; }; }
+  function xfrmOf(spPr) {
+    var x = kid(spPr, 'xfrm'); if (!x) return null;
+    var off = kid(x, 'off'), ext = kid(x, 'ext');
+    if (!off || !ext) return null;
+    return { x: +off.getAttribute('x'), y: +off.getAttribute('y'), w: +ext.getAttribute('cx'), h: +ext.getAttribute('cy'), x0: x };
+  }
+
+  async function walk(container, s, srels, map, zip, size, tally, imgCache) {
+    if (!container) return;
+    for (var i = 0; i < container.children.length; i++) {
+      var c = container.children[i];
+      switch (c.localName) {
+        case 'sp': shape(c, s, map); break;
+        case 'pic': await picture(c, s, srels, map, zip, size, tally, imgCache); break;
+        case 'graphicFrame': frame(c, s, map, tally, size); break;
+        case 'grpSp': {
+          var gx = xfrmOf(kid(c, 'grpSpPr')), sub = map;
+          if (gx) {
+            var chOff = kid(gx.x0, 'chOff'), chExt = kid(gx.x0, 'chExt');
+            if (chOff && chExt) {
+              var cx = +chOff.getAttribute('x'), cy = +chOff.getAttribute('y');
+              var kx = gx.w / (+chExt.getAttribute('cx') || 1), ky = gx.h / (+chExt.getAttribute('cy') || 1);
+              sub = (function (outer, g) {
+                return function (x, y, w, h) { return outer(g.x + (x - cx) * kx, g.y + (y - cy) * ky, w * kx, h * ky); };
+              })(map, gx);
+            }
+          }
+          await walk(c, s, srels, sub, zip, size, tally, imgCache);
+          break;
+        }
+        case 'AlternateContent': await walk(kid(c, 'Choice') || kid(c, 'Fallback'), s, srels, map, zip, size, tally, imgCache); break;
+      }
+    }
+  }
+  function geom(spPr, map) {
+    var g = xfrmOf(spPr);
+    return g ? map(g.x, g.y, g.w, g.h) : { x: 0, y: 1e12, w: 0, h: 0 };
+  }
+
+  function para(p) {
+    var pPr = kid(p, 'pPr');
+    var runs = [], text = '';
+    Array.prototype.forEach.call(p.children, function (c) {
+      if (c.localName === 'r' || c.localName === 'fld') {
+        var t = (kid(c, 't') || {}).textContent || '';
+        var rPr = kid(c, 'rPr');
+        runs.push({ t: t, b: rPr && rPr.getAttribute('b') === '1', i: rPr && rPr.getAttribute('i') === '1' });
+        text += t;
+      } else if (c.localName === 'br') { runs.push({ br: true }); text += ' '; }
+    });
+    var bullet = null;
+    if (pPr) {
+      if (kid(pPr, 'buNone')) bullet = false;
+      else if (kid(pPr, 'buChar') || kid(pPr, 'buAutoNum')) bullet = true;
+    }
+    return { lvl: pPr ? +(pPr.getAttribute('lvl') || 0) : 0, runs: runs, text: text, bullet: bullet };
+  }
+  function paras(txBody) { return kids(txBody, 'p').map(para).filter(function (p) { return p.text.trim(); }); }
+
+  function shape(c, s, map) {
+    var ph = desc(kid(c, 'nvSpPr'), 'ph')[0];
+    var type = ph ? (ph.getAttribute('type') || 'body') : null;
+    if (/^(dt|ftr|sldNum|hdr)$/.test(type)) return;
+    var ps = paras(kid(c, 'txBody'));
+    if (!ps.length) return;
+    var g = geom(kid(c, 'spPr'), map);
+    if ((type === 'title' || type === 'ctrTitle') && !s.title) {
+      s.title = ps.map(function (p) { return p.text; }).join(' ').replace(/\s+/g, ' ').trim();
+      s.ctr = type === 'ctrTitle';
+    } else if (type === 'subTitle' && !s.subtitle) {
+      s.subtitle = ps;
+    } else {
+      s.blocks.push({ paras: ps, x: g.x, y: g.y, placeholder: !!type });
+    }
+  }
+
+  var MIME = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', svg: 'image/svg+xml', webp: 'image/webp', bmp: 'image/bmp' };
+  async function picture(c, s, srels, map, zip, size, tally, imgCache) {
+    var nv = kid(c, 'nvPicPr');
+    if (desc(nv, 'videoFile').length || desc(nv, 'audioFile').length || desc(nv, 'media').length) tally.media++;
+    var svg = desc(c, 'svgBlip')[0], blip = desc(c, 'blip')[0];
+    var rel = (svg && srels[rAttr(svg, 'embed')]) || (blip && srels[rAttr(blip, 'embed')]);
+    if (!rel || !rel.target) return;
+    var ext = rel.target.split('.').pop().toLowerCase();
+    if (ext === 'emf' || ext === 'wmf') {
+      // the svg/png fallback may exist alongside; otherwise skip
+      var fb = blip && srels[rAttr(blip, 'embed')];
+      if (fb && fb.target && MIME[fb.target.split('.').pop().toLowerCase()]) rel = fb;
+      else { tally.vector++; return; }
+      ext = rel.target.split('.').pop().toLowerCase();
+    }
+    if (!MIME[ext]) { tally.vector++; return; }
+    var g = geom(kid(c, 'spPr'), map);
+    var area = g.w * g.h / (size.cx * size.cy);
+    if (g.w && area < 0.004) return;   // bullets/specks, not content
+    var img = imgCache[rel.target] || (imgCache[rel.target] = await prepImage(await zip.bytes(rel.target), MIME[ext]));
+    if (!img) { tally.vector++; return; }
+    var cNvPr = desc(nv, 'cNvPr')[0];
+    s.images.push({ src: img.src, w: img.w || g.w, h: img.h || g.h, x: g.x, y: g.y, area: area, alt: cNvPr ? cNvPr.getAttribute('descr') || '' : '' });
+  }
+  async function prepImage(bytes, mime) {
+    if (!bytes) return null;
+    var blob = new Blob([bytes], { type: mime }), w = 0, h = 0;
+    if (mime !== 'image/svg+xml') {
+      try {
+        var bmp = await createImageBitmap(blob);
+        w = bmp.width; h = bmp.height;
+        var max = Math.max(w, h);
+        if (max > 2400 || mime === 'image/bmp') {   // keep the output file a sensible size
+          var k = Math.min(1, 2400 / max), cv = document.createElement('canvas');
+          cv.width = Math.round(w * k); cv.height = Math.round(h * k);
+          cv.getContext('2d').drawImage(bmp, 0, 0, cv.width, cv.height);
+          var type = mime === 'image/jpeg' ? 'image/jpeg' : 'image/png';
+          blob = await new Promise(function (r) { cv.toBlob(r, type, 0.86); });
+          w = cv.width; h = cv.height;
+        }
+        bmp.close();
+      } catch (e) { return null; }
+    }
+    var src = await new Promise(function (r) { var fr = new FileReader(); fr.onload = function () { r(fr.result); }; fr.readAsDataURL(blob); });
+    return { src: src, w: w, h: h };
+  }
+
+  function frame(c, s, map, tally, size) {
+    var gd = desc(c, 'graphicData')[0];
+    var uri = gd ? gd.getAttribute('uri') || '' : '';
+    var g = geom(c, map);   // graphicFrame keeps its xfrm directly, not under spPr
+    var missing = function (kind) {
+      s.images.push({ missing: kind, x: g.x, y: g.y, area: g.w * g.h / (size.cx * size.cy) });
+    };
+    if (/\/table$/.test(uri)) {
+      var rows = desc(gd, 'tr').map(function (tr) {
+        return kids(tr, 'tc').filter(function (tc) { return tc.getAttribute('hMerge') !== '1'; }).map(function (tc) {
+          return {
+            text: paras(kid(tc, 'txBody')).map(function (p) { return p.text.trim(); }).join('\n'),
+            span: +(tc.getAttribute('gridSpan') || 1),
+            hidden: tc.getAttribute('vMerge') === '1'
+          };
+        });
+      }).filter(function (r) { return r.some(function (c) { return c.text; }); });
+      if (rows.length) s.tables.push(rows);
+    } else if (/\/chart$/.test(uri)) { tally.charts++; missing('Chart'); }
+    else if (/\/diagram$/.test(uri)) { tally.smartart++; missing('SmartArt'); }
+  }
+
+  async function readPalette(zip, presRels) {
+    var themeRel = relOfType(presRels, '/theme');
+    var t = themeRel && themeRel.target ? await zip.text(themeRel.target) : null;
+    if (!t) return Object.assign({}, FALLBACK_PAL);
+    var scheme = desc(xml(t).documentElement, 'clrScheme')[0];
+    var col = function (name) {
+      var n = kid(scheme, name); if (!n) return null;
+      var srgb = kid(n, 'srgbClr'), sys = kid(n, 'sysClr');
+      var v = srgb ? srgb.getAttribute('val') : sys ? sys.getAttribute('lastClr') : null;
+      return v && /^[0-9a-f]{6}$/i.test(v) ? '#' + v.toLowerCase() : null;
+    };
+    var bg = col('lt1') || FALLBACK_PAL.bg, text = col('dk1') || FALLBACK_PAL.text;
+    if (contrast(bg, text) < 4.5) { bg = FALLBACK_PAL.bg; text = FALLBACK_PAL.text; }
+    var accent = ['accent1', 'accent2', 'accent3', 'accent4', 'accent5', 'accent6', 'dk2'].map(col).filter(Boolean)
+      .filter(function (c) { return contrast(c, bg) >= 2.6; })[0] || FALLBACK_PAL.accent;
+    return { bg: bg, text: text, accent: accent };
+  }
+
+  /* ------------------------------------------------------------ COLOUR --- */
+  function hex(h) { var s = h.replace('#', ''); return [0, 2, 4].map(function (i) { return parseInt(s.slice(i, i + 2), 16); }); }
+  function mix(a, b, t) { var x = hex(a), y = hex(b); return '#' + x.map(function (n, i) { return ('0' + Math.round(n + (y[i] - n) * t).toString(16)).slice(-2); }).join(''); }
+  function lum(h) { var x = hex(h).map(function (n) { n /= 255; return n <= 0.03928 ? n / 12.92 : Math.pow((n + 0.055) / 1.055, 2.4); }); return 0.2126 * x[0] + 0.7152 * x[1] + 0.0722 * x[2]; }
+  function contrast(a, b) { var la = lum(a), lb = lum(b); return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05); }
+  function rgba(h, a) { return 'rgba(' + hex(h).join(',') + ',' + a + ')'; }
+
+  /* ------------------------------------------------------------- BUILD --- */
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+  function runsHTML(runs) {
+    return runs.map(function (r) {
+      if (r.br) return '<br>';
+      var t = esc(r.t);
+      if (r.b) t = '<strong>' + t + '</strong>';
+      if (r.i) t = '<em>' + t + '</em>';
+      return t;
+    }).join('');
+  }
+  /* One text block → <p> for a lone paragraph, nested <ul> by indent level otherwise. */
+  function blockHTML(ps, reveal) {
+    var listy = ps.length > 1 || ps.some(function (p) { return p.bullet === true; });
+    if (!listy) return '<p>' + runsHTML(ps[0].runs) + '</p>';
+    var out = '', depth = -1, base = Math.min.apply(null, ps.map(function (p) { return p.lvl; }));
+    ps.forEach(function (p, i) {
+      var lvl = Math.min(p.lvl - base, depth + 1);
+      if (lvl > depth) { while (depth < lvl) { out += '<ul>'; depth++; } }
+      else { out += '</li>'; while (depth > lvl) { out += '</ul></li>'; depth--; } }
+      var plain = p.bullet === false ? ' class="plain' + (reveal && lvl === 0 ? ' fragment' : '') + '"' : (reveal && lvl === 0 ? ' class="fragment"' : '');
+      out += '<li' + plain + '>' + runsHTML(p.runs);
+    });
+    out += '</li>';
+    while (depth > 0) { out += '</ul></li>'; depth--; }
+    return out + '</ul>';
+  }
+  function textStats(blocks) {
+    var chars = 0, lines = 0;
+    blocks.forEach(function (b) { b.paras.forEach(function (p) { chars += p.text.length; lines++; }); });
+    return { chars: chars, lines: lines };
+  }
+  function bodySize(st, narrow) {
+    var s = st.chars < 220 && st.lines <= 6 ? 44 : 36;
+    if (st.chars > 320 || st.lines > 7) s = 30;
+    if (st.chars > 560 || st.lines > 10) s = 26;
+    if (st.chars > 850 || st.lines > 14) s = 22;
+    if (st.chars > 1200) s = 20;
+    if (narrow) s = Math.max(20, Math.round(s * 0.86));
+    return s;
+  }
+  function titleSize(t, big) {
+    var n = t.length;
+    if (big) return n <= 28 ? 124 : n <= 56 ? 96 : 72;
+    return n <= 32 ? 80 : n <= 64 ? 64 : 52;
+  }
+  function figure(img, cls) {
+    if (img.missing) return '<figure class="figure missing"><span>' + img.missing + ' from the original slide wasn’t converted.<br>Drop a screenshot of it here.</span></figure>';
+    return '<figure class="figure' + (cls ? ' ' + cls : '') + '"><img src="' + img.src + '" alt="' + esc(img.alt) + '"></figure>';
+  }
+  function notesHTML(s) {
+    return s.notes.length ? '\n    <aside class="notes">' + s.notes.map(function (n) { return '<p>' + esc(n) + '</p>'; }).join('') + '</aside>' : '';
+  }
+
+  function slideHTML(s, i, total, opts, sectionNo) {
+    var hasText = s.blocks.length > 0;
+    var body = s.blocks.map(function (b) { return blockHTML(b.paras, opts.reveal); }).join('\n');
+    var st = textStats(s.blocks);
+    var title = s.title ? esc(s.title) : '';
+    var attrs = ' data-title="' + esc(s.title || ('Slide ' + (i + 1))) + '"';
+    var bg = s.images.length === 1 && !s.images[0].missing && s.images[0].area > 0.8 ? s.images[0] : null;
+
+    if (bg) {
+      var words = (s.subtitle ? textStats([{ paras: s.subtitle }]).chars : 0) + st.chars;
+      return '<section class="slide l-hero"' + attrs + '>' + figure(bg, 'bg') + '<div class="scrim"></div>' +
+        '<div class="over">' + (title ? '<h2 style="--t:' + titleSize(s.title, false) + 'px">' + title + '</h2>' : '') +
+        (s.subtitle ? '<p class="sub">' + s.subtitle.map(function (p) { return runsHTML(p.runs); }).join('<br>') + '</p>' : '') +
+        (hasText ? '<div class="body" style="--fs:' + bodySize(st, words > 300) + 'px">' + body + '</div>' : '') +
+        '</div>' + notesHTML(s) + '</section>';
+    }
+    if (s.layout === 'secHead' && !s.images.length && !s.tables.length && title) {
+      return sectionHTML(s, attrs, title, sectionNo);
+    }
+    if (i === 0 || s.ctr) {
+      var sub = s.subtitle ? s.subtitle.map(function (p) { return runsHTML(p.runs); }).join('<br>') : '';
+      var media = s.images.filter(function (m) { return !m.missing; })[0];
+      return '<section class="slide l-cover' + (media ? ' has-media' : '') + '"' + attrs + '><div class="cover-text">' +
+        '<span class="rule"></span>' +
+        (title ? '<h1 style="--t:' + titleSize(s.title, !media) + 'px">' + title + '</h1>' : '') +
+        (sub ? '<p class="sub">' + sub + '</p>' : '') +
+        (hasText ? '<div class="body" style="--fs:' + Math.min(30, bodySize(st, !!media)) + 'px">' + body + '</div>' : '') +
+        '</div>' + (media ? figure(media) : '') + notesHTML(s) + '</section>';
+    }
+    var head = title ? '<header class="head"><span class="rule"></span><h2 style="--t:' + titleSize(s.title, false) + 'px">' + title + '</h2></header>' : '';
+    if (s.tables.length) {
+      var rows = s.tables[0], cells = rows.reduce(function (a, r) { return a + r.length; }, 0);
+      var fs = cells <= 24 ? 32 : cells <= 40 ? 26 : cells <= 64 ? 21 : 18;
+      var tbl = '<table>' + rows.map(function (r, ri) {
+        var tag = ri === 0 ? 'th' : 'td';
+        return (ri === 0 ? '<thead>' : ri === 1 ? '<tbody>' : '') + '<tr>' + r.map(function (c) {
+          return c.hidden ? '' : '<' + tag + (c.span > 1 ? ' colspan="' + c.span + '"' : '') + '>' + esc(c.text).replace(/\n/g, '<br>') + '</' + tag + '>';
+        }).join('') + '</tr>' + (ri === 0 ? '</thead>' : '');
+      }).join('') + (rows.length > 1 ? '</tbody>' : '') + '</table>';
+      return '<section class="slide l-table"' + attrs + '>' + head +
+        (hasText ? '<div class="body lead" style="--fs:' + Math.min(26, bodySize(st, false)) + 'px">' + body + '</div>' : '') +
+        '<div class="tbl" style="--fs:' + fs + 'px">' + tbl + '</div>' + notesHTML(s) + '</section>';
+    }
+    if (s.images.length && hasText) {
+      return '<section class="slide l-split"' + attrs + '>' + head +
+        '<div class="split"><div class="body" style="--fs:' + bodySize(st, true) + 'px">' + body + '</div>' +
+        (s.images.length === 1 ? figure(s.images[0]) : '<div class="gallery g' + Math.min(4, s.images.length) + '">' + s.images.slice(0, 4).map(function (m) { return figure(m); }).join('') + '</div>') +
+        '</div>' + notesHTML(s) + '</section>';
+    }
+    if (s.images.length) {
+      var n = Math.min(6, s.images.length);
+      return '<section class="slide l-media"' + attrs + '>' + head +
+        '<div class="gallery g' + n + '">' + s.images.slice(0, 6).map(function (m) { return figure(m); }).join('') + '</div>' + notesHTML(s) + '</section>';
+    }
+    if (!hasText && title) return sectionHTML(s, attrs, title, sectionNo);
+    var twoCol = st.lines >= 9 && st.chars / Math.max(1, st.lines) < 70 && s.blocks.length === 1;
+    var fsz = twoCol ? Math.min(32, bodySize({ chars: st.chars / 2, lines: Math.ceil(st.lines / 2) }, false)) : bodySize(st, false);
+    return '<section class="slide l-content"' + attrs + '>' + head +
+      '<div class="body' + (twoCol ? ' cols-2' : '') + (s.blocks.length > 1 ? ' multi' : '') + '" style="--fs:' + fsz + 'px">' + body + '</div>' + notesHTML(s) + '</section>';
+  }
+
+  function sectionHTML(s, attrs, title, sectionNo) {
+    return '<section class="slide l-section"' + attrs + '><span class="sec-num">' + (sectionNo < 10 ? '0' : '') + sectionNo + '</span>' +
+      '<h2 style="--t:' + Math.round(titleSize(s.title, true) * 0.9) + 'px">' + title + '</h2>' +
+      (s.subtitle ? '<p class="sub">' + s.subtitle.map(function (p) { return runsHTML(p.runs); }).join('<br>') + '</p>' : '') + notesHTML(s) + '</section>';
+  }
+  function isSection(s, i) {
+    return i > 0 && !s.images.length && !s.tables.length && !!s.title && !s.ctr && (s.layout === 'secHead' || !s.blocks.length);
+  }
+
+  function buildDeck(model, opts) {
+    var p = model.palette;
+    var dark = lum(p.bg) < 0.36;
+    var muted = mix(p.text, p.bg, 0.38), surface = mix(p.bg, p.text, dark ? 0.08 : 0.05);
+    var sectionNo = 0;
+    var slides = model.slides.map(function (s, i) {
+      if (isSection(s, i)) sectionNo++;
+      return slideHTML(s, i, model.slides.length, opts, sectionNo);
+    }).join('\n\n');
+    var title = model.slides[0].title || model.fileName.replace(/\.pptx?$/i, '');
+    var htmlAttrs = ' lang="en"';
+    if (opts.theme === 'black-red') htmlAttrs += ' data-fs-theme="black-red"';
+    if (opts.theme === 'custom') htmlAttrs += ' data-fs-theme="custom" data-fs-theme-bg="' + opts.bg + '" data-fs-theme-accent="' + opts.accent + '"';
+    var stageAttrs = (opts.rail ? '' : ' data-fs-rail="closed"') + (opts.autoplay ? ' data-fs-autoplay="' + opts.autoplay + '"' : '');
+    var SC = '<' + '/script>', SO = '<' + 'script';
+    return '<!DOCTYPE html>\n<html' + htmlAttrs + '>\n<head>\n<meta charset="UTF-8">\n' +
+      '<meta name="viewport" content="width=device-width, initial-scale=1.0">\n' +
+      '<title>' + esc(title) + '</title>\n' +
+      '<!-- Converted from ' + esc(model.fileName) + ' with Frontend Slides pptx-converter.html -->\n' +
+      '<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>\n' +
+      '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap">\n' +
+      '<style data-fs-base>\n' + BASE_CSS + '\n</style>\n' +
+      '<style>\n' + deckCSS({ bg: p.bg, surface: surface, text: p.text, muted: muted, accent: p.accent }) + '\n</style>\n' +
+      '</head>\n<body>\n<div class="deck-viewport">\n<main class="deck-stage" id="deckStage" aria-label="' + esc(title) + '"' + stageAttrs + '>\n\n' +
+      slides + '\n\n</main>\n</div>\n' + SO + ' data-fs-runtime>\n' + RUNTIME + '\n' + SC + '\n</body>\n</html>\n';
+  }
+
+  function deckCSS(c) {
+    return [
+      '/* THEME: Standard = the PowerPoint file\'s colours. The slides panel / T switches to Black & Red or Custom. */',
+      ':root {',
+      '  --bg-primary: ' + c.bg + ';',
+      '  --surface: ' + c.surface + ';',
+      '  --text-primary: ' + c.text + ';',
+      '  --text-secondary: ' + c.muted + ';',
+      '  --accent: ' + c.accent + ';',
+      '  --accent-glow: ' + rgba(c.accent, 0.3) + ';',
+      '  --slide-bg: var(--bg-primary);',
+      '  --stage-bg: #000;',
+      '  --font-display: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;',
+      '  --font-body: "Inter", ui-sans-serif, system-ui, sans-serif;',
+      '  --pad-x: 120px; --pad-y: 100px;',
+      '}',
+      '.slide { padding: var(--pad-y) var(--pad-x); color: var(--text-primary); font-family: var(--font-body); display: flex; flex-direction: column; gap: 52px; }',
+      '.slide h1, .slide h2 { font-family: var(--font-display); font-weight: 600; font-size: var(--t); letter-spacing: -0.025em; line-height: 1.04; margin: 0; text-wrap: balance; }',
+      '.rule { display: block; width: 84px; height: 8px; border-radius: 4px; background: var(--accent); }',
+      '.head { display: flex; flex-direction: column; gap: 30px; flex: none; }',
+      '.sub { margin: 0; font-size: 40px; line-height: 1.3; color: var(--text-secondary); max-width: 1440px; }',
+      '.body { font-size: var(--fs); line-height: 1.38; min-height: 0; display: flex; flex-direction: column; gap: 0.9em; }',
+      '.body p { margin: 0; }',
+      '.body ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 0.55em; }',
+      '.body li { position: relative; padding-left: 1.15em; }',
+      '.body li::before { content: ""; position: absolute; left: 0; top: 0.52em; width: 0.4em; height: 0.4em; border-radius: 50%; background: var(--accent); }',
+      '.body li.plain { padding-left: 0; } .body li.plain::before { display: none; }',
+      '.body ul ul { margin-top: 0.45em; gap: 0.4em; }',
+      '.body ul ul li { font-size: 0.86em; color: var(--text-secondary); }',
+      '.body ul ul li::before { top: 0.66em; width: 0.5em; height: 3px; border-radius: 2px; background: var(--text-secondary); }',
+      '.body.multi { gap: 1.3em; }',
+      '.body.cols-2 > ul { display: block; columns: 2; column-gap: 96px; }',
+      '.body.cols-2 > ul > li { break-inside: avoid; margin-bottom: 0.55em; }',
+      '.figure { margin: 0; min-width: 0; min-height: 0; display: flex; align-items: center; justify-content: center; }',
+      '.figure img { display: block; width: 100%; height: 100%; object-fit: contain; border-radius: 14px; }',
+      '.figure.missing { height: 100%; min-height: 360px; border: 3px dashed color-mix(in srgb, var(--text-secondary) 45%, transparent); border-radius: 18px; color: var(--text-secondary); font-size: 28px; line-height: 1.4; text-align: center; padding: 40px; }',
+      /* cover */
+      '.l-cover { justify-content: center; }',
+      '.cover-text { display: flex; flex-direction: column; gap: 40px; min-width: 0; }',
+      '.l-cover .rule { width: 140px; height: 12px; border-radius: 6px; }',
+      '.l-cover.has-media { display: grid; grid-template-columns: 1.15fr 0.85fr; grid-template-rows: 100%; gap: 96px; align-items: center; }',
+      '.l-cover.has-media .figure { height: 100%; }',
+      /* section */
+      '.l-section { justify-content: center; gap: 36px; background: linear-gradient(90deg, var(--accent) 0 18px, transparent 18px), var(--slide-bg); }',
+      '.sec-num { font-family: var(--font-display); font-size: 32px; font-weight: 600; letter-spacing: 0.2em; color: var(--accent); }',
+      /* split: text + image */
+      '.split { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 100%; gap: 88px; }',
+      '.split > .body { justify-content: center; }',
+      '.split > .figure, .split > .gallery { height: 100%; }',
+      /* media */
+      '.gallery { flex: 1; min-height: 0; display: grid; gap: 32px; grid-auto-rows: minmax(0, 1fr); }',
+      '.gallery .figure { height: 100%; }',
+      '.g1 { grid-template-columns: 1fr; } .g2 { grid-template-columns: 1fr 1fr; } .g3 { grid-template-columns: repeat(3, 1fr); }',
+      '.g4 { grid-template-columns: 1fr 1fr; } .g5, .g6 { grid-template-columns: repeat(3, 1fr); }',
+      /* full-bleed picture */
+      '.l-hero { padding: 0; justify-content: flex-end; }',
+      '.l-hero .figure.bg { position: absolute; inset: 0; }',
+      '.l-hero .figure.bg img { width: 100%; height: 100%; max-width: none; max-height: none; object-fit: cover; border-radius: 0; }',
+      '.l-hero .scrim { position: absolute; inset: 0; background: linear-gradient(to top, rgba(0,0,0,0.82), rgba(0,0,0,0.25) 55%, rgba(0,0,0,0) 80%); }',
+      '.l-hero .over { position: relative; padding: var(--pad-y) var(--pad-x); color: #fff; display: flex; flex-direction: column; gap: 28px; }',
+      '.l-hero .sub, .l-hero .body ul ul li { color: rgba(255,255,255,0.8); }',
+      /* table */
+      '.l-table .lead { flex: none; }',
+      '.tbl { flex: 1; min-height: 0; font-size: var(--fs); }',
+      '.tbl table { width: 100%; border-collapse: collapse; line-height: 1.3; }',
+      '.tbl th { text-align: left; font-weight: 600; padding: 0.55em 0.75em; border-bottom: 4px solid var(--accent); }',
+      '.tbl td { padding: 0.55em 0.75em; border-bottom: 1px solid color-mix(in srgb, var(--text-secondary) 35%, transparent); vertical-align: top; }',
+      '.tbl tbody tr:nth-child(even) td { background: var(--surface); }'
+    ].join('\n');
+  }
+})();
+</script>
+</body>
+</html>
