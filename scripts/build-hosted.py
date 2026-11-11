@@ -7,8 +7,9 @@ Usage:
 claude.ai wraps a published page in its own <!doctype html><head>…<body>
 skeleton (with charset and viewport tags), so the hosted copy is the same
 page minus the document wrapper. On claude.ai the page uses the visitor's own
-Claude account instead of an API key; publish it with the capabilities
-    {"sample": {"images": true}, "downloads": true}
+Claude account instead of an API key, and keeps finished decks in "My decks"
+(an asset per deck, a private db row per deck). Publish it with the capabilities
+    {"sample": {"images": true}, "downloads": true, "db": {}, "user": {}, "assets": {}}
 Run inline-runtime.py on pptx-converter.html first so the copy is current.
 """
 import re

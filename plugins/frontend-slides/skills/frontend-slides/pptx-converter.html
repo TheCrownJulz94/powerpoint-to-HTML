@@ -1522,6 +1522,27 @@ svg {
   .notes li { padding-left: 18px; position: relative; margin: 4px 0; overflow-wrap: anywhere; }
   .notes li::before { content: "!"; position: absolute; left: 0; color: var(--warn); font-weight: 700; }
   .notes li.ok::before { content: "✓"; color: var(--ok); }
+  .btn.sm { padding: 6px 11px; font-size: 13.5px; border-radius: 8px; }
+  .btn.danger { color: var(--err); }
+  .decks { list-style: none; margin: 4px 0 0; padding: 0; }
+  .decks li { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; padding: 10px 0; border-top: 1px solid var(--line); }
+  .decks li:first-child { border-top: 0; }
+  .decks .dk-main { flex: 1 1 220px; min-width: 0; }
+  .decks .dk-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .decks .dk-meta { font-size: 13px; color: var(--ink-2); }
+  .decks .dk-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  .decks li.current .dk-title::after { content: " · open below"; font-weight: 400; color: var(--ink-2); }
+  #saveState { margin-left: 10px; font-weight: 400; }
+  #saveState.err { color: var(--err); }
+  .edit { margin-top: 18px; border: 1px solid var(--line); border-radius: 14px; background: var(--card); padding: 16px; }
+  .edit h3 { margin: 0 0 4px; font-size: 16px; }
+  .elog { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 8px; max-height: 300px; overflow-y: auto; }
+  .elog li { padding: 8px 12px; border-radius: 10px; font-size: 14.5px; max-width: 85%; overflow-wrap: anywhere; white-space: pre-wrap; }
+  .elog .you { align-self: flex-end; background: var(--ink); color: var(--bg); }
+  .elog .claude { align-self: flex-start; background: var(--bg); border: 1px solid var(--line); }
+  .elog .claude.err { color: var(--err); }
+  .edit textarea { min-height: 64px; }
+  .edit .row { margin-top: 10px; }
   kbd { font: 12px var(--mono); border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; background: var(--card); }
   @media (max-width: 760px) {
     .grid { grid-template-columns: 1fr; }
@@ -1556,6 +1577,12 @@ svg {
       <p class="muted" id="hostedHint" hidden><strong>No API key?</strong> <a id="hostedLink" href="#" target="_blank" rel="noopener">Open this converter on claude.ai</a> and use your Claude account instead.</p>
     </div>
     <p class="muted" id="acctNone" hidden>Claude isn’t available in this view. Open this page inside claude.ai while signed in to your Claude account, then reload.</p>
+  </section>
+
+  <section class="step" id="myDecks" hidden>
+    <h2>My decks</h2>
+    <p class="muted" id="decksNote">Loading your saved decks…</p>
+    <ul class="decks" id="decksList"></ul>
   </section>
 
   <section class="step">
@@ -1626,7 +1653,7 @@ svg {
 
   <section id="result" hidden>
     <div class="rbar">
-      <div class="stats" id="stats"></div>
+      <div class="stats"><span id="stats"></span><span class="muted" id="saveState"></span></div>
       <div class="actions">
         <button class="btn primary" id="download" type="button">Download .html</button>
         <button class="btn" id="fix" type="button" hidden>Fix flagged slides with Claude</button>
@@ -1636,6 +1663,18 @@ svg {
     </div>
     <div class="frame"><iframe id="preview" title="Deck preview" sandbox="allow-scripts"></iframe></div>
     <ul class="notes" id="checks"></ul>
+    <div class="edit" id="editBox">
+      <h3>Ask Claude to change the deck</h3>
+      <p class="muted">For example “Delete slide 4”, “Swap slides 2 and 3”, “Write talking notes for every slide” or “Make the titles smaller”. Slide numbers are the ones in the preview.</p>
+      <ol class="elog" id="elog" hidden></ol>
+      <textarea id="emsg" maxlength="4000" aria-label="Your change request" placeholder="What should Claude change? Press Enter to send, Shift+Enter for a new line."></textarea>
+      <div class="row">
+        <button class="btn primary" id="esend" type="button" disabled>Send</button>
+        <button class="btn" id="estop" type="button" hidden>Stop</button>
+        <button class="btn" id="undo" type="button" hidden>Undo last change</button>
+        <span class="status" id="estatus" role="status" aria-live="polite"></span>
+      </div>
+    </div>
   </section>
 </div>
 
@@ -1666,13 +1705,24 @@ svg {
   var MODE = 'wait';        // 'wait' | 'claude' (signed-in claude.ai viewer) | 'key' (API key) | 'none'
   var sampleFn = null, sampleLimits = null, downloadsNs = null;
   var parsed = null;        // extracted PowerPoint
-  var convo = null;         // API mode: { system, messages } of the last generation, for the fix pass
-  var claudeDeck = null;    // Claude mode: { shell, plan, css: {key: css}, sections: {slideNo: [html]}, plain: [slideNo] }
-  var order = [];           // Claude mode: final slide position → PowerPoint slide number
+  var claudeDeck = null;    // Claude mode, while building: { shell, plan, cutCss, css: {key: css}, sections: {slideNo: [html]}, plain: [slideNo] }
   var rawDeck = '';         // deck HTML with fs-img: placeholders, before assembly
   var finalHTML = '';       // the downloadable deck
   var lastIssues = [];
   var running = null;       // { abort() } while a generation runs
+  // The deck on screen (built now, or opened from My decks) and its editing state
+  var deckImages = {};      // image ID → data URI, for every image the deck may use
+  var deckName = 'deck';    // file name without .html
+  var fromPptx = false;     // built from the PowerPoint loaded now, so "New design" applies
+  var edited = false;       // changed by requests since it was built (or opened from My decks)
+  var undoStack = [];       // earlier versions of rawDeck
+  var editLog = [];         // [{you, claude, err}] change requests and Claude's answers
+  var lastUsage = null;     // API mode: usage of the last request
+  // My decks (claude.ai, for people who can edit this artifact)
+  var store = null;         // { db, assets, decks: collection ref }
+  var deckDocs = [];        // the saved decks, newest first
+  var curDeck = { savedId: null };   // the deck on screen; savedId is its row in My decks
+  var saving = Promise.resolve();
   var Anthropic = null;
 
   /* ----------------------------------------------------------- UI WIRING --- */
@@ -1703,9 +1753,17 @@ svg {
     refresh();
   });
   document.querySelectorAll('input[name=density],input[name=motion],#o-tighten').forEach(function (n) { n.addEventListener('change', refresh); });
-  $('convert').addEventListener('click', function () { if (MODE === 'claude') runClaude('build', false); else runApi(false); });
-  $('fix').addEventListener('click', function () { if (MODE === 'claude') runClaude('fix', false); else runApi(true); });
-  $('fresh').addEventListener('click', function () { if (MODE === 'claude') runClaude('build', true); else runApi(false); });
+  $('convert').addEventListener('click', function () { if (MODE === 'claude') runClaude(false); else runApi(); });
+  $('fix').addEventListener('click', function () { runEdit(fixRequest(), 'fix', 'Fix the flagged slides'); });
+  $('fresh').addEventListener('click', function () { if (MODE === 'claude') runClaude(true); else runApi(); });
+  $('emsg').addEventListener('input', refresh);
+  $('emsg').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendEdit(); }
+  });
+  $('esend').addEventListener('click', sendEdit);
+  $('estop').addEventListener('click', function () { if (running) running.abort(); });
+  $('undo').addEventListener('click', undo);
+  $('decksList').addEventListener('click', onDecksClick);
   $('cancel').addEventListener('click', function () { if (running) running.abort(); });
   $('full').addEventListener('click', function () {
     var f = $('preview'), req = f.requestFullscreen || f.webkitRequestFullscreen;
@@ -1732,6 +1790,7 @@ svg {
       fn.limits().then(function (l) { sampleLimits = l; }, function () { /* no images */ });
     }, function () { setMode('none'); });
     c.use('downloads').then(function (d) { downloadsNs = d; }, function () { /* saving unavailable */ });
+    initStore(c);
   }
   function setMode(m) {
     MODE = m;
@@ -1785,6 +1844,12 @@ svg {
     }
     $('convert').textContent = label;
     $('fresh').disabled = $('fix').disabled = !!running;
+    $('fresh').hidden = !(fromPptx && parsed);
+    var canAsk = !!rawDeck && !running && (MODE === 'claude' || (MODE === 'key' && !!$('key').value.trim()));
+    $('esend').disabled = !canAsk || !$('emsg').value.trim();
+    $('estop').hidden = !(running && running.edit);
+    $('undo').hidden = !undoStack.length;
+    $('undo').disabled = !!running;
   }
 
   async function handleFile(file) {
@@ -2322,22 +2387,6 @@ svg {
         (claudeDeck.cutCss ? ' The shell\'s CSS was cut short, so some classes the plan names may be missing: define any you need in the slide <style> block.' : ''),
       slidesFormat(nums)].filter(Boolean).join('\n\n');
   }
-  function fixPrompt(nums, bySlide, ch, imgs, files) {
-    var cur = nums.map(function (k) { return (claudeDeck.sections[k] || []).join('\n'); }).join('\n\n');
-    var css = Object.keys(claudeDeck.css).map(function (k) { return claudeDeck.css[k]; }).join('\n');
-    var issues = nums.map(function (k) {
-      return bySlide[k].map(function (i) { return '- Slide ' + k + ' [' + i.severity + ', ' + i.type + ']: ' + i.message + (i.selector ? ' (' + i.selector + ')' : ''); }).join('\n');
-    }).join('\n');
-    return [WRAP, brief(files), ch.text,
-      '<deck_shell>\n' + claudeDeck.shell + '\n</deck_shell>',
-      css ? '<slide_css>\n' + css + '\n</slide_css>' : '',
-      '<pptx_content>\n' + header(parsed) + nums.map(function (k) { return slideText(parsed, k - 1); }).join('') + '</pptx_content>',
-      '<current_slides>\n' + cur + '\n</current_slides>',
-      'The page rendered these slides at 1920×1080 with every fragment shown, and the layout audit reported:\n' + issues,
-      imgs.length ? 'Attached images, in order: ' + imgs.join(', ') + '.' : '',
-      'YOUR TASK NOW: rewrite slide' + (nums.length > 1 ? 's ' : ' ') + nums.join(', ') + ' so every problem is gone, keeping the design direction and all of the content.',
-      slidesFormat(nums)].filter(Boolean).join('\n\n');
-  }
   /* Build a prompt within the request size limit, dropping the least essential skill files first. */
   function fitted(build) {
     var sets = [['SKILL.md', 'html-template.md', 'animation-patterns.md', 'STYLE_PRESETS.md'], ['SKILL.md', 'html-template.md', 'animation-patterns.md'], ['SKILL.md', 'html-template.md']];
@@ -2387,19 +2436,19 @@ svg {
     return r.text;
   }
 
-  async function runClaude(kind, fresh) {
+  async function runClaude(fresh) {
     if (running || !parsed || !sampleFn) return;
     var ctl = new AbortController();
     running = { abort: function () { ctl.abort(); } };
     var job = { signal: ctl.signal, fresh: !!fresh, done: 0, total: 1, abort: running.abort };
-    startProgress(kind === 'fix' ? 'Claude is fixing the flagged slides…' : 'Claude is designing the look of your deck…',
-      'If Claude asks for permission, choose Allow.');
+    startProgress('Claude is designing the look of your deck…', 'If Claude asks for permission, choose Allow.');
     try {
       if (!sampleLimits) { try { sampleLimits = await sampleFn.limits(); } catch (e) { sampleLimits = null; } }
-      if (kind === 'fix') await claudeFix(job); else await claudeBuild(job);
+      await claudeBuild(job);
       running = null;
+      startDeck();
       assembleClaude();
-      showResult(null, kind === 'fix');
+      showResult(null, 'build', 0);
     } catch (e) {
       running = null;
       if (e && e.code !== 'cancelled') console.warn('Claude request failed', e);
@@ -2486,33 +2535,6 @@ svg {
     if (!nested) { job.done++; progressTick(job); }
   }
 
-  async function claudeFix(job) {
-    var bySlide = {};
-    lastIssues.forEach(function (i) { var k = order[i.slide - 1]; if (k) (bySlide[k] = bySlide[k] || []).push(i); });
-    claudeDeck.plain.forEach(function (k) {
-      (bySlide[k] = bySlide[k] || []).push({ severity: 'error', type: 'undesigned', message: 'This slide is a plain fallback version. Design it properly with the shell\'s layouts.', selector: '' });
-    });
-    var nums = Object.keys(bySlide).map(Number).sort(function (a, b) { return a - b; });
-    var groups = [];
-    for (var i = 0; i < nums.length; i += BATCH) groups.push(nums.slice(i, i + BATCH));
-    job.total = groups.length; job.done = 0;
-    var ch = choices();
-    await pool(groups, PARALLEL, job, async function (g) {
-      var imgs = attached(imagesOf(g)), text, cut = false;
-      try {
-        text = await ask(fitted(function (f) { return fixPrompt(g, bySlide, ch, imgs, f.filter(function (x) { return x !== 'STYLE_PRESETS.md'; })); }), imgs, 'medium', job, null);
-      } catch (e) {                                               // cut short: use the slides that finished, keep the rest as they were
-        if (!e || e.code !== 'truncated') throw e;
-        text = e.text || ''; cut = true;
-      }
-      var got = parseSlides(text, 'fix ' + g.join(',') + ' ' + Date.now(), cut);
-      g.forEach(function (k) {
-        if (got[k]) { claudeDeck.sections[k] = got[k]; claudeDeck.plain = claudeDeck.plain.filter(function (x) { return x !== k; }); }
-      });
-      job.done++; progressTick(job);
-    });
-  }
-
   /* Run fn over items, at most n at once; the first failure cancels the rest. */
   async function pool(items, n, job, fn) {
     var next = 0, firstErr = null;
@@ -2563,7 +2585,7 @@ svg {
     var s = parsed.slides[k - 1];
     var body = s.blocks.map(function (b) { return '<ul>' + b.paras.map(function (p) { return '<li>' + esc(p.text) + '</li>'; }).join('') + '</ul>'; }).join('');
     var pic = s.pics[0] ? '<img src="fs-img:' + s.pics[0].id + '" alt="" style="max-height:460px;max-width:900px;object-fit:contain">' : '';
-    var h = '<section class="slide" data-slide="' + k + '" data-title="' + esc(s.title || ('Slide ' + k)) + '" style="padding:100px 120px;display:flex;flex-direction:column;gap:32px;font-size:34px;line-height:1.35">' +
+    var h = '<section class="slide" data-slide="' + k + '" data-fs-plain data-title="' + esc(s.title || ('Slide ' + k)) + '" style="padding:100px 120px;display:flex;flex-direction:column;gap:32px;font-size:34px;line-height:1.35">' +
       (s.title ? '<h2 style="font-size:72px;margin:0">' + esc(s.title) + '</h2>' : '') + body + pic +
       (s.notes.length ? '<aside class="notes">' + esc(s.notes.join(' ')) + '</aside>' : '') + '</section>';
     claudeDeck.sections[k] = [h];
@@ -2572,9 +2594,8 @@ svg {
 
   function assembleClaude() {
     var parts = [];
-    order = [];
     for (var k = 1; k <= parsed.slides.length; k++) {
-      (claudeDeck.sections[k] || []).forEach(function (h) { parts.push(h); order.push(k); });
+      (claudeDeck.sections[k] || []).forEach(function (h) { parts.push(h); });
     }
     var css = Object.keys(claudeDeck.css).map(function (key) { return '/* ' + key + ' */\n' + claudeDeck.css[key]; }).join('\n');
     var html = claudeDeck.shell.replace(MARK, function () { return '\n' + parts.join('\n\n') + '\n'; });
@@ -2641,8 +2662,7 @@ svg {
     }
     blocks.push({
       type: 'text',
-      text: ch.text + '\n\n' + (ch.extra ? ch.extra + '\n\n' : '') + '<pptx_content>\n' + describe(model) + '</pptx_content>\n\nDesign the complete deck now. Reply with only the HTML document.',
-      cache_control: { type: 'ephemeral' }     // the fix pass re-uses this whole prefix from the cache
+      text: ch.text + '\n\n' + (ch.extra ? ch.extra + '\n\n' : '') + '<pptx_content>\n' + describe(model) + '</pptx_content>\n\nDesign the complete deck now. Reply with only the HTML document.'
     });
     return blocks;
   }
@@ -2664,7 +2684,7 @@ svg {
     return Anthropic;
   }
 
-  async function runApi(isFix) {
+  async function runApi() {
     if (running) return;
     var key = $('key').value.trim();
     if (!key || !parsed) return;
@@ -2673,13 +2693,7 @@ svg {
 
     // The key is the user's own, used from their own local page, and sent only to api.anthropic.com.
     var client = new Anthropic({ apiKey: key, dangerouslyAllowBrowser: true, timeout: 40 * 60 * 1000 });
-    var messages;
-    if (isFix && convo) {
-      messages = convo.messages.concat([{ role: 'user', content: apiFixRequest(lastIssues) }]);
-    } else {
-      convo = { system: systemPrompt(), messages: [{ role: 'user', content: userContent(parsed, choices()) }] };
-      messages = convo.messages;
-    }
+    var system = systemPrompt(), messages = [{ role: 'user', content: userContent(parsed, choices()) }];
 
     running = client.beta.messages.stream({
       model: MODEL,
@@ -2688,11 +2702,11 @@ svg {
       fallbacks: 'default',                         // on a policy decline, the API re-runs on a suitable model
       thinking: { type: 'adaptive', display: 'summarized' },
       output_config: { effort: 'high' },
-      system: [{ type: 'text', text: convo.system, cache_control: { type: 'ephemeral' } }],
+      system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],   // "New design" re-reads it from the cache
       messages: messages
     });
     var total = parsed.slides.length, text = '', lastSections = -1;
-    startProgress(isFix ? 'Claude is fixing the layout issues…' : 'Claude is planning the design…', '');
+    startProgress('Claude is planning the design…', '');
 
     try {
       for await (var event of running) {
@@ -2724,10 +2738,10 @@ svg {
           : 'Claude’s reply didn’t contain a complete HTML document. Please try again.');
         return;
       }
-      convo.messages = messages.concat([{ role: 'assistant', content: msg.content }]);
+      startDeck();
       rawDeck = doc;
       finalHTML = assemble(doc);
-      showResult(msg.usage, isFix);
+      showResult(msg.usage, 'build', 0);
     } catch (e) {
       running = null;
       failed(explainError(e));
@@ -2756,12 +2770,6 @@ svg {
     return 'Something went wrong: ' + (e && e.message || e);
   }
   function apiMessage(e) { return (e.error && e.error.error && e.error.error.message) || e.message; }
-  function apiFixRequest(issues) {
-    var list = issues.map(function (i) { return '- Slide ' + i.slide + ' [' + i.severity + ', ' + i.type + ']: ' + i.message + (i.selector ? ' (' + i.selector + ')' : ''); }).join('\n');
-    return 'The page rendered your deck at 1920×1080 with every fragment shown, and the runtime\'s layout audit reported these problems (slide numbers are 1-based):\n' + list +
-      '\n\nReturn the complete corrected HTML document under the same output contract. Fix every problem without changing the design direction; split a slide in two if its content cannot fit.';
-  }
-
   /* ------------------------------------------------------ SHARED --- */
   function startProgress(title, line) {
     $('progress').hidden = false;
@@ -2797,10 +2805,10 @@ svg {
     if (!/<script\b[^>]*data-fs-runtime/i.test(html)) html = html.replace(/<\/body>/i, function (m) { return '<script data-fs-runtime><' + '/script>\n' + m; });
     html = html.replace(/(<style\b[^>]*data-fs-base[^>]*>)[\s\S]*?(<\/style>)/i, function (m, a, b) { return a + '\n' + BASE_CSS + '\n' + b; });
     html = html.replace(/(<script\b[^>]*data-fs-runtime[^>]*>)[\s\S]*?(<\/script>)/i, function (m, a, b) { return a + '\n' + RUNTIME + '\n' + b; });
-    html = html.replace(/fs-img:([A-Za-z0-9_-]+)/g, function (m, id) { return parsed.images[id] ? parsed.images[id].src : m; });
+    html = html.replace(/fs-img:([A-Za-z0-9_-]+)/g, function (m, id) { return deckImages[id] || m; });
     // Stage options from the page (slides panel, autoplay)
     var extra = ($('o-rail').checked ? '' : ' data-fs-rail="closed"') + ($('o-auto').checked ? ' data-fs-autoplay="' + $('o-secs').value + '"' : '');
-    if (extra) html = html.replace(/<main\b([^>]*\bdeck-stage\b[^>]*)>/i, function (m, attrs) { return '<main' + attrs.replace(/\sdata-fs-(rail|autoplay)="[^"]*"/g, '') + extra + '>'; });
+    html = html.replace(/<main\b([^>]*\bdeck-stage\b[^>]*)>/i, function (m, attrs) { return '<main' + attrs.replace(/\sdata-fs-(rail|autoplay)="[^"]*"/g, '') + extra + '>'; });
     return html;
   }
 
@@ -2817,22 +2825,39 @@ svg {
     'd.slides.forEach(function(s,i){d.slides.forEach(function(x,j){x.classList.toggle("active",i===j);x.classList.toggle("visible",i===j);});' +
     'd.stage.querySelectorAll(".fragment").forEach(function(f){f.classList.add("fs-shown");});' +
     'FS.audit({slide:i}).forEach(function(r){issues.push({slide:r.slide,severity:r.severity,type:r.type,message:r.message,selector:r.selector});});});' +
-    'st.remove();d.goToSlide(cur,0,"audit");' +
+    'st.remove();d.goToSlide(Math.max(0,Math.min(e.data.start|0,d.total-1)),0,"audit");' +
     'parent.postMessage({fs:"audit-result",issues:issues,slides:d.total},"*");},700);});});})();<' + '/script>';
 
-  function showResult(usage, isFix) {
+  /* kind: 'build' | 'fix' | 'edit' | 'undo' | 'open'; focus: 0-based slide the preview opens on. */
+  function showResult(usage, kind, focus) {
     $('progress').hidden = true;
-    var slides = (rawDeck.match(/<section\b[^>]*class="[^"]*\bslide\b/g) || []).length;
-    $('stats').textContent = slides + ' slides · ' + Math.round(finalHTML.length / 1024) + ' KB · ' +
-      (MODE === 'claude' ? 'made with your Claude plan' : 'this run ≈ $' + usageCost(usage).toFixed(2));
+    $('stats').textContent = countSlides(rawDeck) + ' slides · ' + Math.round(finalHTML.length / 1024) + ' KB' +
+      (usage ? ' · this run ≈ $' + usageCost(usage).toFixed(2) : kind === 'build' ? ' · made with your Claude plan' : '');
     $('checks').innerHTML = '<li class="ok">Checking the layout…</li>';
     $('fix').hidden = true;
     var frame = $('preview');
-    frame.onload = function () { frame.contentWindow.postMessage({ fs: 'audit' }, '*'); };
+    frame.onload = function () { frame.contentWindow.postMessage({ fs: 'audit', start: focus || 0 }, '*'); };
     frame.srcdoc = finalHTML.replace(/<\/body>(?![\s\S]*<\/body>)/i, function (m) { return AUDIT_BRIDGE + m; });
     $('result').hidden = false;
-    status(isFix ? 'Updated deck ready.' : 'Your deck is ready. Click the preview and use the arrow keys, or download it.');
+    status(kind === 'build' ? 'Your deck is ready. Click the preview and use the arrow keys, or download it.' :
+      kind === 'open' ? 'Opened “' + titleOf(rawDeck) + '” from My decks.' : 'Updated deck ready.');
+    renderLog();
     refresh();
+    if (kind !== 'open') autosave();
+  }
+  function countSlides(raw) { return (raw.match(/<section\b[^>]*class="[^"]*\bslide\b/g) || []).length; }
+  function titleOf(raw) {
+    var m = /<title>([\s\S]*?)<\/title>/i.exec(raw), t = document.createElement('textarea');
+    t.innerHTML = m ? m[1] : '';
+    return t.value.trim() || deckName;
+  }
+  /* A new deck from the PowerPoint loaded now: fresh images, name, edit history and My decks entry. */
+  function startDeck() {
+    deckImages = {};
+    Object.keys(parsed.images).forEach(function (id) { deckImages[id] = parsed.images[id].src; });
+    deckName = parsed.fileName.replace(/\.pptx?$/i, '');
+    fromPptx = true; edited = false; undoStack = []; editLog = [];
+    curDeck = { savedId: null };
   }
   function usageCost(u) {
     if (!u) return 0;
@@ -2841,12 +2866,11 @@ svg {
   }
 
   /* On claude.ai the page can't start downloads itself; the downloads capability asks the viewer instead. */
-  async function saveDeck() {
-    if (!finalHTML || !parsed) return;
-    var name = parsed.fileName.replace(/\.pptx?$/i, '') + '.html';
+  function saveDeck() { if (finalHTML) offerFile(deckName + '.html', finalHTML); }
+  async function offerFile(name, html) {
     if (downloadsNs) {
       try {
-        await downloadsNs.save({ filename: name, data: new Blob([finalHTML], { type: 'text/html' }) });
+        await downloadsNs.save({ filename: name, data: new Blob([html], { type: 'text/html' }) });
         status('Saved ' + name + '.');
       } catch (e) {
         var c = e && e.code;
@@ -2859,7 +2883,7 @@ svg {
     }
     if (MODE !== 'key') { status('Saving files isn’t available in this view.', true); return; }
     var a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([finalHTML], { type: 'text/html' }));
+    a.href = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
     a.download = name;
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(function () { URL.revokeObjectURL(a.href); }, 4000);
@@ -2871,8 +2895,8 @@ svg {
     var issues = e.data.issues || [];
     lastIssues = issues;
     var errors = issues.filter(function (i) { return i.severity !== 'warn'; });
-    var missing = (rawDeck.match(/fs-img:[A-Za-z0-9_-]+/g) || []).filter(function (m) { return !parsed.images[m.slice(7)]; });
-    var plain = MODE === 'claude' && claudeDeck ? claudeDeck.plain.slice().sort(function (a, b) { return a - b; }) : [];
+    var missing = (rawDeck.match(/fs-img:[A-Za-z0-9_-]+/g) || []).filter(function (m) { return !deckImages[m.slice(7)]; });
+    var split = splitDeck(rawDeck), plain = split ? plainPositions(split) : [];
     var items = [];
     if (!issues.length) items.push('<li class="ok">Layout check passed: no overflow, overlap or tiny text on any slide.</li>');
     else {
@@ -2882,10 +2906,406 @@ svg {
     }
     if (plain.length) items.push('<li>Claude couldn’t finish slide' + plural(plain.length) + ' ' + plain.join(', ') + ', so a plain version is in place. “Fix flagged slides” asks Claude again.</li>');
     if (missing.length) items.push('<li>Claude referenced image IDs that don’t exist: ' + esc(missing.join(', ')) + '</li>');
-    if (MODE !== 'claude' && e.data.slides && e.data.slides < parsed.slides.length) items.push('<li>The deck has ' + e.data.slides + ' slides but the PowerPoint has ' + parsed.slides.length + '.</li>');
+    if (MODE !== 'claude' && fromPptx && !edited && parsed && e.data.slides && e.data.slides < parsed.slides.length) items.push('<li>The deck has ' + e.data.slides + ' slides but the PowerPoint has ' + parsed.slides.length + '.</li>');
     $('checks').innerHTML = items.join('');
     $('fix').hidden = !issues.length && !plain.length;
   }
+
+  /* ------------------------------------------------ CHANGE REQUESTS --- */
+  /* The deck as editable parts: everything up to the stage's opening tag, one string per slide, the rest. */
+  function splitDeck(raw) {
+    var open = /<main\b[^>]*\bdeck-stage\b[^>]*>/i.exec(raw || '');
+    var close = (raw || '').lastIndexOf('</main>');
+    if (!open || close < open.index) return null;
+    var at = open.index + open[0].length, t = document.createElement('template');
+    t.innerHTML = raw.slice(at, close);
+    var slides = Array.prototype.filter.call(t.content.children, function (n) { return n.matches('section.slide'); })
+      .map(function (n) { return n.outerHTML; });
+    return { pre: raw.slice(0, at), slides: slides, post: raw.slice(close) };
+  }
+  function joinDeck(m) { return m.pre + '\n' + m.slides.join('\n\n') + '\n' + m.post; }
+  function plainPositions(m) {
+    var out = [];
+    m.slides.forEach(function (h, i) { if (/^<section\b[^>]*\sdata-fs-plain\b/i.test(h)) out.push(i + 1); });
+    return out;
+  }
+
+  var EDIT_INTRO = 'You are the design engine inside the Frontend Slides PowerPoint converter, a web page. The user has a finished Frontend Slides deck and asks for a change in their own words. The Frontend Slides skill files below are your design brief: follow their rules on design quality, the fixed 1920×1080 stage, density, typography, animation, fragments, theme-switchable colours and speaker notes. You are not an interactive agent here: skip every step that asks questions, runs scripts, reads files or opens a browser. The page applies your changes, fills the empty data-fs-base and data-fs-runtime tags with the shared stage CSS and runtime, and runs the layout audit afterwards.';
+  var EDIT_FORMAT = [
+    'Reply in this format, with nothing else and no markdown fences:',
+    '<summary>One or two short sentences to the user saying what you changed, or why you changed nothing.</summary>',
+    'Then the changes, as any number of these tags. Slide numbers always mean the deck as shown above, before this change:',
+    '<delete n="4"></delete> removes slide 4.',
+    '<replace n="3">…</replace> replaces slide 3 with the <section class="slide" data-title="…"> element(s) inside it (two sections split it in two).',
+    '<insert after="5">…</insert> adds new <section class="slide" data-title="…"> element(s) after slide 5; after="0" puts them first.',
+    '<move n="7" after="2"></move> moves slide 7 to follow slide 2; after="0" makes it the first slide.',
+    '<add_css>…</add_css> adds CSS after the deck\'s existing styles, so its rules win at equal specificity. Start it with @import url(…) to load another Google Font. Scope a rule for one slide to a class you give that slide.',
+    'Change only what the request needs: every slide you do not mention stays exactly as it is. Build new and changed slides from the deck\'s own classes and theme variables so they match, keep text at 18px or larger, put speaker notes in <aside class="notes"> inside the slide, use only the image IDs listed, and write no <script> elements.'
+  ].join('\n');
+
+  function slideOutline(h) {
+    var t = document.createElement('template');
+    t.innerHTML = h;
+    var sec = t.content.firstElementChild, title = sec ? sec.getAttribute('data-title') || '' : '';
+    var text = (sec ? sec.textContent : '').replace(/\s+/g, ' ').trim();
+    return (title ? title + ': ' : '') + (text.length > 220 ? text.slice(0, 220) + '…' : text);
+  }
+  function editPrompt(m, request, files, only) {
+    var slides = m.slides.map(function (h, i) {
+      var n = i + 1;
+      if (!only || only.indexOf(n) >= 0) return '<slide n="' + n + '">\n' + h + '\n</slide>';
+      return '<slide n="' + n + '" shown="outline">' + esc(slideOutline(h)) + '</slide>';
+    }).join('\n');
+    var ids = Object.keys(deckImages), recent = editLog.filter(function (t) { return t.claude && !t.err; }).slice(-4);
+    return [EDIT_INTRO, files.length ? brief(files) : '',
+      '<deck_head>\n' + m.pre + '\n</deck_head>',
+      '<slides count="' + m.slides.length + '">\n' + slides + '\n</slides>',
+      only ? 'To fit the request size, slides marked shown="outline" are summarised. You may delete or move them, but replace only slides shown in full.' : '',
+      '<deck_end>\n' + m.post + '\n</deck_end>',
+      ids.length ? 'Image IDs you can use (src="fs-img:ID", or url("fs-img:ID") in CSS): ' + ids.join(', ') + '.' : 'The deck has no images you can add.',
+      recent.length ? '<earlier_requests>\n' + recent.map(function (t) { return '- The user asked: ' + t.you + '\n  You did: ' + t.claude; }).join('\n') + '\n</earlier_requests>' : '',
+      '<request>\n' + request + '\n</request>',
+      EDIT_FORMAT].filter(Boolean).join('\n\n');
+  }
+  /* The largest prompt that fits: whole slides first, then outlines for slides the request doesn't name. */
+  function editInput(m, request) {
+    var sets = [['SKILL.md', 'html-template.md', 'animation-patterns.md'], ['SKILL.md', 'html-template.md'], ['SKILL.md'], []];
+    var named = (request.match(/\d+/g) || []).map(Number).filter(function (n) { return n >= 1 && n <= m.slides.length; });
+    for (var pass = 0; pass < 2; pass++) {
+      for (var i = 0; i < sets.length; i++) {
+        var p = editPrompt(m, request, sets[i], pass ? named : null);
+        if (new Blob([p]).size <= MAX_INPUT) return p;
+      }
+    }
+    throw { code: 'prompt_too_large' };
+  }
+
+  function attrNum(attrs, name) {
+    var x = new RegExp('\\b' + name + '\\s*=\\s*["\']?(\\d+)', 'i').exec(attrs || '');
+    return x ? +x[1] : null;
+  }
+  function sectionsIn(html) {
+    var t = document.createElement('template');
+    t.innerHTML = stripFences(html);
+    return Array.prototype.filter.call(t.content.querySelectorAll('section.slide'), function (n) {
+      return !(n.parentElement && n.parentElement.closest('section.slide'));
+    }).map(function (n) {
+      n.querySelectorAll('script').forEach(function (x) { x.remove(); });
+      n.removeAttribute('data-fs-plain');
+      return n.outerHTML;
+    });
+  }
+  function parseEdit(text) {
+    var t = stripFences(text || ''), ops = [], m;
+    var sum = /<summary>([\s\S]*?)<\/summary>/i.exec(t);
+    var re = /<(delete|move)\b([^>]*?)\/?>(?:\s*<\/\1>)?|<(replace|insert)\b([^>]*)>([\s\S]*?)<\/\3>|<add_css>([\s\S]*?)<\/add_css>/gi;
+    while ((m = re.exec(t))) {
+      if (m[1]) ops.push({ op: m[1].toLowerCase(), n: attrNum(m[2], 'n'), after: attrNum(m[2], 'after') });
+      else if (m[3]) ops.push({ op: m[3].toLowerCase(), n: attrNum(m[4], 'n'), after: attrNum(m[4], 'after'), html: sectionsIn(m[5]) });
+      else ops.push({ op: 'css', css: m[6] });
+    }
+    return { summary: sum ? sum[1].replace(/\s+/g, ' ').trim() : '', ops: ops };
+  }
+  /* Apply the changes; slide numbers in them refer to the deck before this change. */
+  function applyEdit(m, ops) {
+    var N = m.slides.length, bad = 0, changed = 0, css = [];
+    var items = m.slides.map(function (h) { return { html: h, del: false, hit: false }; });
+    var ok = function (k) { return k != null && k >= 1 && k <= N; };
+    ops.forEach(function (o) {
+      if (o.op === 'css') { if (o.css.trim()) { css.push(o.css); changed++; } }
+      else if (o.op === 'replace') { if (ok(o.n) && o.html.length) { items[o.n - 1].html = o.html.join('\n\n'); items[o.n - 1].hit = true; changed++; } else bad++; }
+      else if (o.op === 'delete') { if (ok(o.n)) { items[o.n - 1].del = true; changed++; } else bad++; }
+    });
+    var list = items.slice();
+    ops.forEach(function (o) {
+      if (o.op !== 'move') return;
+      if (!ok(o.n) || o.after == null || (o.after && !ok(o.after)) || o.after === o.n) { bad++; return; }
+      var it = items[o.n - 1];
+      list.splice(list.indexOf(it), 1);
+      list.splice(o.after ? list.indexOf(items[o.after - 1]) + 1 : 0, 0, it);
+      it.hit = true; changed++;
+    });
+    var tail = {};   // several inserts after the same slide keep their order
+    ops.forEach(function (o) {
+      if (o.op !== 'insert') return;
+      if (o.after == null || (o.after && !ok(o.after)) || !o.html.length) { bad++; return; }
+      var it = { html: o.html.join('\n\n'), del: false, hit: true }, prev = tail[o.after] || (o.after ? items[o.after - 1] : null);
+      list.splice(prev ? list.indexOf(prev) + 1 : 0, 0, it);
+      tail[o.after] = it; changed++;
+    });
+    var firstDel = items.findIndex(function (x) { return x.del; });
+    var kept = list.filter(function (x) { return !x.del; });
+    var focus = kept.findIndex(function (x) { return x.hit; });
+    if (focus < 0) focus = Math.max(0, Math.min(firstDel, kept.length - 1));
+    var pre = css.length ? addCss(m.pre, css.join('\n')) : m.pre;
+    return { pre: pre, slides: kept.map(function (x) { return x.html; }), post: m.post, changed: changed, bad: bad, focus: focus };
+  }
+  /* Edit CSS lives in one <style data-fs-edit-css> before </head>; @imports go first so they stay valid. */
+  function addCss(pre, css) {
+    css = css.replace(/<\/?style\b[^>]*>/gi, '');
+    var imports = (css.match(/@import[^;]+;/gi) || []).join('\n');
+    css = css.replace(/@import[^;]+;/gi, '').trim();
+    var block = /(<style data-fs-edit-css>)([\s\S]*?)(<\/style>)/i;
+    if (block.test(pre)) return pre.replace(block, function (x, a, body, c) { return a + (imports ? '\n' + imports : '') + body + '\n' + css + '\n' + c; });
+    return pre.replace(/<\/head>/i, function (x) { return '<style data-fs-edit-css>\n' + (imports ? imports + '\n' : '') + css + '\n</style>\n' + x; });
+  }
+
+  /* One request to Claude in either mode. Resolves the reply text; rejects with {code} or an SDK error. */
+  async function complete(input, o) {
+    if (MODE === 'claude') return ask(input, [], o.effort, o.job, o.onText);
+    await loadSDK();
+    var client = new Anthropic({ apiKey: $('key').value.trim(), dangerouslyAllowBrowser: true, timeout: 20 * 60 * 1000 });
+    var stream = client.beta.messages.stream({
+      model: MODEL,
+      max_tokens: 64000,
+      betas: ['server-side-fallback-2026-07-01'],
+      fallbacks: 'default',
+      thinking: { type: 'adaptive', display: 'summarized' },
+      output_config: { effort: o.effort },
+      messages: [{ role: 'user', content: input }]
+    }, { signal: o.job.signal });
+    var text = '';
+    for await (var ev of stream) {
+      if (ev.type === 'content_block_delta' && ev.delta.type === 'text_delta') {
+        text += ev.delta.text;
+        if (o.onText) o.onText({ text: text });
+      }
+    }
+    var msg = await stream.finalMessage();
+    lastUsage = msg.usage;
+    if (msg.stop_reason === 'refusal') throw { code: 'refused' };
+    if (msg.stop_reason === 'max_tokens') throw { code: 'truncated' };
+    return replyText(msg);
+  }
+
+  function sendEdit() {
+    var msg = $('emsg').value.trim();
+    if (!msg || $('esend').disabled) return;
+    runEdit(msg, 'edit', msg).then(function (ok) { if (ok) { $('emsg').value = ''; refresh(); } });
+  }
+  async function runEdit(request, kind, label) {
+    if (running || !rawDeck || (MODE !== 'claude' && MODE !== 'key')) return false;
+    if (MODE === 'key' && !$('key').value.trim()) { editStatus('Paste your API key at the top of the page first.', true); return false; }
+    var m = splitDeck(rawDeck), input;
+    if (!m) { editStatus('This deck’s slides couldn’t be found.', true); return false; }
+    try { input = editInput(m, request); } catch (e) { editStatus(editError(e), true); return false; }
+    var ctl = new AbortController();
+    var job = { signal: ctl.signal, fresh: true, abort: function () { ctl.abort(); } };
+    running = { abort: job.abort, edit: true };
+    var turn = { you: label, claude: '' };
+    editLog.push(turn);
+    renderLog();
+    editStatus(MODE === 'claude' ? 'Claude is working on it…' : 'Claude is working on it… (billed to your API key)');
+    refresh();
+    var text;
+    try {
+      text = await complete(input, { effort: 'medium', job: job, onText: function (u) {
+        editStatus('Claude is writing the changes… ' + Math.max(1, Math.round(u.text.length / 1000)) + 'k characters');
+      } });
+    } catch (e) {
+      running = null;
+      if (e && e.code !== 'cancelled') console.warn('Claude request failed', e);
+      turn.claude = editError(e);
+      turn.err = !(e && e.code === 'cancelled') && !(Anthropic && e instanceof Anthropic.APIUserAbortError);
+      editStatus(''); renderLog(); refresh();
+      return false;                                    // keep the request in the box to try again
+    }
+    running = null;
+    editStatus('');
+    var r = parseEdit(text), res = applyEdit(m, r.ops);
+    if (!res.changed || !res.slides.length) {
+      turn.claude = !res.slides.length ? 'That would remove every slide, so nothing was changed.' : (r.summary || 'Claude didn’t change anything.');
+      renderLog(); refresh();
+      return true;
+    }
+    undoStack.push(rawDeck);
+    rawDeck = joinDeck(res);
+    edited = true;
+    turn.claude = (r.summary || 'Done.') + (res.bad ? ' (' + res.bad + ' of the changes referred to slides that don’t exist and were skipped.)' : '');
+    finalHTML = assemble(rawDeck);
+    showResult(MODE === 'key' ? lastUsage : null, kind, res.focus);
+    return true;
+  }
+  /* The layout audit's findings (and any plain stand-ins) as a change request. */
+  function fixRequest() {
+    var m = splitDeck(rawDeck), lines = lastIssues.map(function (i) {
+      return '- Slide ' + i.slide + ' [' + i.severity + ', ' + i.type + ']: ' + i.message + (i.selector ? ' (' + i.selector + ')' : '');
+    });
+    (m ? plainPositions(m) : []).forEach(function (n) {
+      var k = parseInt((/\sdata-slide="(\d+)"/.exec(m.slides[n - 1]) || [])[1], 10);
+      lines.push('- Slide ' + n + ' [error, undesigned]: a plain stand-in, because it couldn’t be designed earlier. Design it properly with the deck’s layouts.' +
+        (fromPptx && parsed && parsed.slides[k - 1] ? '\n  Its original PowerPoint content:\n' + slideText(parsed, k - 1).trim().replace(/^/gm, '  ') : ''));
+    });
+    return 'The page rendered the deck at 1920×1080 with every fragment shown, and the layout audit reported:\n' + lines.join('\n') +
+      '\n\nReplace the affected slides so every problem is gone, keeping the design direction and all of the content. Split a slide in two if its content cannot fit at a readable size.';
+  }
+  function undo() {
+    if (running || !undoStack.length) return;
+    rawDeck = undoStack.pop();
+    editLog.push({ you: 'Undo', claude: 'Back to the version before your last change.' });
+    finalHTML = assemble(rawDeck);
+    showResult(null, 'undo', 0);
+  }
+  function editError(e) {
+    var c = e && e.code;
+    if (c === 'cancelled' || (Anthropic && e instanceof Anthropic.APIUserAbortError)) return 'Stopped. Nothing was changed.';
+    if (c === 'truncated') return 'That change was too big for one reply. Ask for less at once, for example a few slides at a time.';
+    if (c === 'refused') return 'Claude declined to make that change.';
+    if (c === 'prompt_too_large') return 'This deck is too large to send to Claude in one request.';
+    return MODE === 'claude' ? sampleMessage(e) : explainError(e);
+  }
+  function editStatus(msg, err) { var s = $('estatus'); s.textContent = msg; s.classList.toggle('err', !!err); }
+  function renderLog() {
+    var ol = $('elog');
+    ol.innerHTML = '';
+    editLog.slice(-30).forEach(function (t) {
+      var a = document.createElement('li');
+      a.className = 'you'; a.textContent = t.you; ol.appendChild(a);
+      var b = document.createElement('li');
+      b.className = 'claude' + (t.err ? ' err' : ''); b.textContent = t.claude || 'Working on it…'; ol.appendChild(b);
+    });
+    ol.hidden = !editLog.length;
+    ol.scrollTop = ol.scrollHeight;
+  }
+
+  /* -------------------------------------------------------- MY DECKS --- */
+  /* Each finished deck is one asset (the HTML, stored as text) plus one private row under
+     data/users/<id>/profile/decks. Only people who can edit this artifact may store assets,
+     so everyone else gets no list (and keeps Download). */
+  async function initStore(c) {
+    try {
+      var got = await Promise.all([c.use('db'), c.use('user'), c.use('assets')]);
+      if (!got[0] || !got[1] || !got[2]) return;
+      var uid = await got[1].id();
+      if (!uid) return;
+      store = { db: got[0], assets: got[2], decks: got[0].doc('data/users/' + uid + '/profile').collection('decks') };
+    } catch (e) { return; }
+    $('myDecks').hidden = false;
+    var timer = setTimeout(function () { $('decksNote').textContent = 'Your saved decks can’t be reached yet. They’ll appear when the connection comes back.'; }, 10000);
+    store.decks.orderBy('updatedAt', 'desc').onSnapshot(function (snap) {
+      if (!snap.metadata.fromCache) clearTimeout(timer);
+      deckDocs = snap.docs.filter(function (d) { return d.exists; });
+      renderDecks();
+    }, function (e) {
+      clearTimeout(timer);
+      $('decksNote').textContent = 'Your saved decks couldn’t be loaded (' + ((e && e.code) || 'error') + ').';
+    });
+  }
+  function renderDecks() {
+    var list = $('decksList');
+    $('decksNote').textContent = deckDocs.length
+      ? 'Saved to your Claude account, and updated whenever you fix or change a deck. Only you see this list.'
+      : 'Decks you make here are saved to your Claude account automatically. None yet.';
+    list.innerHTML = '';
+    deckDocs.forEach(function (d) {
+      var x = d.data(), li = document.createElement('li');
+      li.setAttribute('data-id', d.id);
+      if (d.id === curDeck.savedId) li.className = 'current';
+      li.innerHTML = '<div class="dk-main"><div class="dk-title"></div><div class="dk-meta"></div></div>' +
+        '<div class="dk-actions"><button class="btn sm" data-a="open" type="button">Open</button>' +
+        '<button class="btn sm" data-a="get" type="button">Download</button>' +
+        '<button class="btn sm danger" data-a="del" type="button">Delete</button></div>';
+      li.querySelector('.dk-title').textContent = x.title || 'Untitled deck';
+      li.querySelector('.dk-meta').textContent = (x.slides || 0) + ' slides · ' + when(x.updatedAt) + (x.sizeBytes ? ' · ' + Math.round(x.sizeBytes / 1024) + ' KB' : '');
+      list.appendChild(li);
+    });
+  }
+  function when(ts) {
+    try { return new Date(ts).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }); } catch (e) { return ''; }
+  }
+  function onDecksClick(e) {
+    var b = e.target.closest('button');
+    if (!b) return;
+    var id = b.closest('li').getAttribute('data-id');
+    var d = deckDocs.filter(function (x) { return x.id === id; })[0];
+    if (!d) return;
+    var a = b.getAttribute('data-a');
+    if (a === 'open') openSaved(d);
+    else if (a === 'get') fetchSaved(d).then(function (html) { offerFile((d.data().fileName || 'deck') + '.html', html); }, function () { status('That deck’s file is missing. You can delete it from the list.', true); });
+    else if (a === 'del') {
+      if (b.getAttribute('data-sure') !== '1') {
+        b.setAttribute('data-sure', '1'); b.textContent = 'Delete for good?';
+        setTimeout(function () { if (b.isConnected) { b.removeAttribute('data-sure'); b.textContent = 'Delete'; } }, 4000);
+        return;
+      }
+      deleteSaved(d);
+    }
+  }
+  async function fetchSaved(d) {
+    var r = await fetch('/_blob/' + d.data().asset);
+    if (!r.ok) throw { code: 'missing' };
+    return r.text();
+  }
+  async function openSaved(d) {
+    if (running) return;
+    status('Opening “' + (d.data().title || 'deck') + '”…');
+    var html;
+    try { html = await fetchSaved(d); } catch (e) { status('That deck’s file is missing. You can delete it from the list.', true); return; }
+    var got = rawFromSaved(html);
+    if (!splitDeck(got.raw)) { status('That file doesn’t look like a deck made here.', true); return; }
+    deckImages = got.images; rawDeck = got.raw; deckName = d.data().fileName || 'deck';
+    fromPptx = false; edited = true; undoStack = []; editLog = [];
+    curDeck = { savedId: d.id };
+    finalHTML = assemble(rawDeck);      // with this page's current runtime
+    showResult(null, 'open', 0);
+    renderDecks();
+    $('result').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+  /* A saved (assembled) deck back to editable form: empty base/runtime tags, images as fs-img IDs. */
+  function rawFromSaved(html) {
+    var seen = {}, images = {}, n = 0;
+    html = html.replace(/(<style\b[^>]*data-fs-base[^>]*>)[\s\S]*?(<\/style>)/i, '$1$2')
+      .replace(/(<script\b[^>]*data-fs-runtime[^>]*>)[\s\S]*?(<\/script>)/i, '$1$2')
+      .replace(/data:image\/[a-z0-9.+-]+;base64,[A-Za-z0-9+\/=]+/gi, function (u) {
+        if (!seen[u]) { seen[u] = 'saved' + (++n); images[seen[u]] = u; }
+        return 'fs-img:' + seen[u];
+      });
+    return { raw: html, images: images };
+  }
+  async function deleteSaved(d) {
+    var asset = d.data().asset;
+    try {
+      await store.decks.doc(d.id).delete();
+      if (d.id === curDeck.savedId) curDeck.savedId = null;
+      if (asset) await store.assets.delete(asset).catch(function () { /* the row is gone; an orphan file is harmless */ });
+      status('Deleted “' + (d.data().title || 'deck') + '” from My decks.');
+    } catch (e) { status('Couldn’t delete that deck (' + ((e && e.code) || 'error') + ').', true); }
+  }
+  /* Save the deck on screen, one save at a time. A changed deck replaces its earlier file:
+     the row is pointed at the new file first, then the old file it no longer uses is removed. */
+  function autosave() {
+    if (!store || !finalHTML) return;
+    var deck = curDeck, html = finalHTML, meta = { title: titleOf(rawDeck), fileName: deckName, slides: countSlides(rawDeck) };
+    saveState('Saving to My decks…');
+    saving = saving.then(function () { return saveNow(deck, html, meta); });
+  }
+  async function saveNow(deck, html, meta) {
+    var up;
+    try { up = await store.assets.upload(new Blob([html], { type: 'text/plain' }), { type: 'text/plain' }); }
+    catch (e) {
+      var c = e && e.code;
+      saveState(c === 'too_large' ? 'Too large for My decks (over 20 MB). Download it instead.' :
+        c === 'quota_or_state' ? 'My decks is full. Delete some decks to save new ones.' :
+        'Couldn’t save to My decks (' + (c || 'error') + ').', true);
+      return;
+    }
+    var now = Date.now(), old = null;
+    try {
+      var row = { title: meta.title, fileName: meta.fileName, slides: meta.slides, sizeBytes: up.sizeBytes, asset: up.id, updatedAt: now };
+      var ref = deck.savedId ? store.decks.doc(deck.savedId) : store.decks.doc();
+      var cur = deck.savedId ? await ref.get() : null;
+      if (cur && cur.exists) { old = cur.data().asset; await ref.update(row); }
+      else { row.createdAt = now; await ref.set(row); }
+      deck.savedId = ref.id;
+    } catch (e) {
+      store.assets.delete(up.id).catch(function () { /* nothing points at it */ });
+      saveState('Couldn’t save to My decks (' + ((e && e.code) || 'error') + ').', true);
+      return;
+    }
+    if (old && old !== up.id) store.assets.delete(old).catch(function () { /* stays as an unused file */ });
+    if (deck === curDeck) { saveState('Saved to My decks.'); renderDecks(); }
+  }
+  function saveState(msg, err) { var s = $('saveState'); s.textContent = msg ? '· ' + msg : ''; s.classList.toggle('err', !!err); }
 
   function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
 })();
