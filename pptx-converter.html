@@ -2221,21 +2221,60 @@ svg {
   }
   var WRAP = [
     'You are the design engine inside the Frontend Slides PowerPoint converter, a web page on claude.ai. A user dropped a .pptx into the page; the page extracted its content and sends it to you with the user\'s design choices. The deck is built in steps: first one request designs the look (the "shell": every font, colour, layout and animation), then later requests write the slides a few at a time using that shell.',
-    'The Frontend Slides skill files below are your design brief and markup contract. You are not an interactive agent here: skip every step that asks the user questions, generates style previews, runs scripts, reads files or opens a browser. The user\'s answers are already given and replace Phases 0-2. Apply Phase 4 (PPT conversion) and Phase 3 (generation) with every rule about design quality, the fixed 1920×1080 stage, density, typography, animation, fragments, theme-switchable colours and speaker notes. The page itself fills <style data-fs-base></style> and <script data-fs-runtime><\/script> (what inline-runtime.py does) and runs the layout audit afterwards.'
+    'The Frontend Slides skill files below are your design brief and markup contract. You are not an interactive agent here: skip every step that asks the user questions, generates style previews, runs scripts, reads files or opens a browser. The user\'s answers are already given and replace Phases 0-2. Apply Phase 4 (PPT conversion) and Phase 3 (generation) with every rule about design quality, the fixed 1920×1080 stage, density, typography, animation, fragments, theme-switchable colours and speaker notes. The page builds the HTML document around your work as html-template.md shows, fills <style data-fs-base></style> and <script data-fs-runtime><\/script> (what inline-runtime.py does) and runs the layout audit afterwards.'
   ].join('\n\n');
-  var SHELL_TASK = [
-    'YOUR TASK NOW (step 1 of 2): design the whole deck\'s visual system and write its shell. You are not writing the slides yet, but you have seen all of them, so design every layout and component they will need.',
-    '',
-    'Reply with exactly these two parts, with nothing before, between or after them and no markdown fences:',
-    '<deck_shell>',
-    'A complete HTML document as in html-template.md: <title>, font <link>s (Google Fonts), the empty <style data-fs-base></style>, then ONE <style> holding all CSS for the deck: theme tokens following the theme-switchable colours rule, backgrounds and atmosphere, the type scale, every slide layout and component class the plan names, chart and table styles, entrance animations keyed on .slide.visible, .fragment styling if used, and prefers-reduced-motion. The body is <div class="deck-viewport"><main class="deck-stage" id="deckStage">' + MARK + '</main></div>, then the empty <script data-fs-runtime><\/script>, then optionally one deck-specific <script> that listens for "slidechange". Write ' + MARK + ' exactly; the page puts the slides there.',
-    '</deck_shell>',
-    '<slide_plan>',
-    'A JSON array with one object per PowerPoint slide, in order: {"slide": 1, "layout": "the layout class to use", "parts": "which component classes and structure the slide uses", "notes": "how to treat its content: which image goes where, how a chart is drawn, or that it splits into two slides"}.',
-    '</slide_plan>',
-    '',
-    'Size everything in stage pixels for the 1920×1080 stage. Name classes so they can be reused across slides (for example .layout-split, .stat-card). Keep text at 18px or larger. No external resources except Google Fonts.'
-  ].join('\n');
+  /* Step 1 asks only for the parts Claude designs; the page builds the document (buildShell).
+     One claude.ai reply is limited in length and time, so the reply has a size budget, and a
+     cut-short reply keeps whatever finished (designShell). The compact form is the retry. */
+  function shellTask(compact, plan) {
+    var css = compact
+      ? 'The deck\'s CSS, without <style> tags: theme tokens in :root, the type scale, 4 to 6 reusable slide layouts, the components the plan needs most, simple entrance animations keyed on .slide.visible, .fragment styling if used, and prefers-reduced-motion.'
+      : 'All of the deck\'s CSS, without <style> tags: theme tokens in :root, backgrounds and atmosphere, the type scale, every layout and component class the plan names, chart and table styles, entrance animations keyed on .slide.visible, .fragment styling if used, and prefers-reduced-motion.';
+    return [
+      'YOUR TASK NOW (step 1 of 2): design the deck\'s visual system. You are not writing the slides yet, but you have seen all of them, so design the layouts and components they need.' +
+        (compact ? ' An earlier attempt was too long for one reply, so this time keep the design compact.' : ''),
+      plan ? 'The slide plan is already decided:\n<slide_plan>\n' + JSON.stringify(plan) + '\n</slide_plan>' : '',
+      'Reply with exactly these parts, in this order, with nothing before, between or after them and no markdown fences:\n' +
+        (plan ? '' : '<slide_plan>\nA JSON array with one object per PowerPoint slide, in order: {"slide": 1, "layout": "the layout class", "notes": "at most 20 words: the component classes it uses, where its images go, how a chart is drawn, or that it splits into two slides"}.\n</slide_plan>\n') +
+        '<deck_fonts>\nThe <link> tag(s) that load the deck\'s fonts from Google Fonts.\n</deck_fonts>\n' +
+        '<deck_css>\n' + css + '\n</deck_css>\n' +
+        '<deck_script>\nOptional JavaScript, without <script> tags, for deck behaviour such as count-ups on the "slidechange" event. Leave it empty if the deck needs none.\n</deck_script>',
+      'The page builds the HTML document around these parts as html-template.md shows (title, base styles, .deck-viewport, the .deck-stage and the runtime), so do not write <html>, <head>, <body> or the stage elements. Give the five theme colours the default role names (--bg-primary, --surface, --text-primary, --text-secondary, --accent); other tokens may derive from them. Size everything in stage pixels for the 1920×1080 stage, keep text at 18px or larger, name classes so slides can reuse them (for example .layout-split, .stat-card), and load nothing except Google Fonts.',
+      'LENGTH: one reply is limited in length and time, so keep the whole reply under about ' + (compact ? '12,000' : '30,000') + ' characters. Write compact CSS (no comments, short rules) and reuse classes across slides; each slide can add small one-off styles of its own later.'
+    ].filter(Boolean).join('\n\n');
+  }
+  function deckTitle() {
+    var t = parsed.slides[0] && parsed.slides[0].title;
+    return t || (parsed.fileName || 'Presentation').replace(/\.pptx?$/i, '');
+  }
+  function buildShell(p) {
+    return '<!DOCTYPE html>\n<html lang="en">\n<head>\n<meta charset="UTF-8">\n<meta name="viewport" content="width=device-width, initial-scale=1.0">\n' +
+      '<title>' + esc(deckTitle()) + '</title>\n' + (p.fonts ? p.fonts + '\n' : '') +
+      '<style data-fs-base></style>\n<style>\n' + p.css + '\n</style>\n</head>\n<body>\n' +
+      '<div class="deck-viewport">\n<main class="deck-stage" id="deckStage">\n' + MARK + '\n</main>\n</div>\n' +
+      '<script data-fs-runtime><' + '/script>\n' + (p.js ? '<script>\n' + p.js + '\n<' + '/script>\n' : '') + '</body>\n</html>';
+  }
+  /* A tagged part of a reply: its text, and whether its closing tag arrived. */
+  function part(t, tag) {
+    var s = new RegExp('<' + tag + '>', 'i').exec(t || '');
+    if (!s) return null;
+    var rest = t.slice(s.index + s[0].length), e = new RegExp('<\\/' + tag + '>', 'i').exec(rest);
+    return { text: (e ? rest.slice(0, e.index) : rest).trim(), done: !!e };
+  }
+  /* A stylesheet cut short, kept up to its last complete top-level rule. */
+  function completeCSS(css) {
+    var depth = 0, end = 0, q = null;
+    for (var i = 0; i < css.length; i++) {
+      var c = css[i];
+      if (q) { if (c === '\\') i++; else if (c === q) q = null; continue; }
+      if (c === '/' && css[i + 1] === '*') { var x = css.indexOf('*/', i + 2); if (x < 0) break; i = x + 1; }
+      else if (c === '"' || c === '\'') q = c;
+      else if (c === '{') depth++;
+      else if (c === '}') { if (depth > 0) depth--; if (!depth) end = i + 1; }
+      else if (c === ';' && !depth) end = i + 1;
+    }
+    return css.slice(0, end).trim();
+  }
   function slidesFormat(nums) {
     return [
       'Reply with only HTML, with no markdown fences and no other text:',
@@ -2246,11 +2285,11 @@ svg {
       '- If a slide cannot fit at a readable size, split it into two sections with the same data-slide and data-title "… (1/2)" and "… (2/2)".'
     ].join('\n');
   }
-  function shellPrompt(ch, imgs, files) {
+  function shellPrompt(ch, imgs, files, compact, plan) {
     return [WRAP, brief(files), ch.text, ch.extra,
       '<pptx_content>\n' + describe(parsed) + '</pptx_content>',
       imgs.length ? 'Attached images, in order: ' + imgs.join(', ') + ' (small previews of the PowerPoint images with those IDs).' : '',
-      SHELL_TASK].filter(Boolean).join('\n\n');
+      shellTask(compact, plan)].filter(Boolean).join('\n\n');
   }
   function batchPrompt(nums, ch, imgs, files) {
     var plan = (claudeDeck.plan || []).filter(function (p) { return p && nums.indexOf(+p.slide) >= 0; });
@@ -2260,7 +2299,8 @@ svg {
       plan.length ? '<slide_plan>\n' + JSON.stringify(plan, null, 1) + '\n</slide_plan>' : '',
       '<pptx_content>\n' + header(parsed) + nums.map(function (k) { return slideText(parsed, k - 1); }).join('') + '</pptx_content>',
       imgs.length ? 'Attached images, in order: ' + imgs.join(', ') + '.' : '',
-      'YOUR TASK NOW (step 2 of 2): write ' + range + ' of the ' + parsed.slides.length + '-slide deck, using the shell\'s CSS and the plan.',
+      'YOUR TASK NOW (step 2 of 2): write ' + range + ' of the ' + parsed.slides.length + '-slide deck, using the shell\'s CSS and the plan.' +
+        (claudeDeck.cutCss ? ' The shell\'s CSS was cut short, so some classes the plan names may be missing: define any you need in the slide <style> block.' : ''),
       slidesFormat(nums)].filter(Boolean).join('\n\n');
   }
   function fixPrompt(nums, bySlide, ch, imgs, files) {
@@ -2315,13 +2355,16 @@ svg {
     return out;
   }
 
+  /* claude.ai keeps answers for five minutes and replays them, cut-short ones included;
+     a prompt whose answer was cut short or unusable always goes back to Claude. */
+  var noReplay = new Set();
   async function ask(input, imgIds, effort, job, onText) {
     var o = { modelTier: 'complex', effort: effort, signal: job.signal };
-    if (job.fresh) o.cache = false;
+    if (job.fresh || noReplay.has(input)) o.cache = false;
     if (imgIds.length) o.images = imgIds.map(function (id) { return b64Blob(parsed.images[id].thumb, 'image/jpeg'); });
     if (onText) o.onText = onText;
     var r = await sampleFn(input, o);
-    if (r.truncated) throw { code: 'truncated', text: r.text };
+    if (r.truncated) { noReplay.add(input); throw { code: 'truncated', text: r.text }; }
     return r.text;
   }
 
@@ -2349,19 +2392,49 @@ svg {
     var batches = batchesFor(parsed), ch = choices();
     job.total = batches.length + 1;
     var imgs = attached(Object.keys(parsed.images));
-    var text = await ask(fitted(function (f) { return shellPrompt(ch, imgs, f); }), imgs, 'high', job, function (u) {
-      $('pThink').textContent = 'Writing the design system… ' + Math.round(u.text.length / 1000) + 'k characters so far';
-    });
-    var shell = between(text, 'deck_shell'), plan = between(text, 'slide_plan');
-    shell = extractHTML(shell || text);
-    if (!shell) throw { code: 'bad_shell' };
-    if (shell.indexOf(MARK) < 0) shell = shell.replace(/(<main\b[^>]*\bdeck-stage\b[^>]*>)[\s\S]*?(<\/main>)/i, function (m, a, b) { return a + '\n' + MARK + '\n' + b; });
-    if (shell.indexOf(MARK) < 0) throw { code: 'bad_shell' };
-    var planArr = [];
-    try { planArr = JSON.parse(stripFences(plan || '[]')); } catch (e) { planArr = []; }
-    claudeDeck = { shell: shell, plan: Array.isArray(planArr) ? planArr : [], css: {}, sections: {}, plain: [] };
-    job.done = 1; progressTick(job);
+    var d = await designShell(job, ch, imgs, false, null);
+    job.done = 1;
+    if (!d.css) {                                        // cut short before the CSS was usable: one compact retry
+      job.total++;
+      $('pTitle').textContent = 'That design was too long for one reply. Asking Claude for a more compact one…';
+      d = await designShell(job, ch, imgs, true, d.plan.length ? d.plan : null);
+      job.done = 2;
+      if (!d.css) throw { code: 'truncated' };
+    }
+    claudeDeck = { shell: buildShell(d), plan: d.plan, cutCss: d.cut, css: {}, sections: {}, plain: [] };
+    progressTick(job);
     await pool(batches, PARALLEL, job, function (b) { return writeSlides(b, job, ch, false); });
+  }
+
+  /* Step 1: Claude designs the look. A reply cut short keeps its finished plan and the CSS
+     rules that were complete; css is null when too little of it arrived to build on. */
+  async function designShell(job, ch, imgs, compact, knownPlan) {
+    var text, cut = false, input = fitted(function (f) { return shellPrompt(ch, imgs, f, compact, knownPlan); });
+    try {
+      text = await ask(input, imgs, compact ? 'low' : 'medium', job, function (u) {
+        $('pThink').textContent = (compact ? 'Writing a compact design system… ' : 'Writing the design system… ') + Math.round(u.text.length / 1000) + 'k characters so far';
+      });
+    } catch (e) {
+      if (!e || (e.code !== 'truncated' && e.code !== 'empty_completion')) throw e;
+      text = e.text || ''; cut = true;
+    }
+    text = stripFences(text);
+    var plan = knownPlan || [], pl = part(text, 'slide_plan');
+    if (!knownPlan && pl && pl.done) { try { plan = JSON.parse(stripFences(pl.text)); } catch (e) { plan = []; } }
+    if (!Array.isArray(plan)) plan = [];
+    var css = part(text, 'deck_css'), fonts = part(text, 'deck_fonts'), js = part(text, 'deck_script');
+    if (!css) {                                          // a whole document instead of the parts: take its styles
+      var styles = text.match(/<style\b(?![^>]*data-fs-base)[^>]*>[\s\S]*?(<\/style>|$)/gi) || [];
+      if (styles.length) css = { text: styles.map(function (s) { return s.replace(/<\/?style\b[^>]*>/gi, ''); }).join('\n'), done: /<\/style>\s*$/i.test(styles[styles.length - 1]) };
+    }
+    var sheet = css ? css.text.replace(/<\/?style\b[^>]*>/gi, '') : '';
+    if (css && !css.done) { sheet = completeCSS(sheet); cut = true; }
+    var links = ((fonts ? fonts.text : text.split(/<deck_css>|<style\b/i)[0]).match(/<link\b[^>]*>/gi) || [])
+      .filter(function (l) { return /fonts\.(googleapis|gstatic)\.com/i.test(l); });
+    var script = js && js.done ? js.text.replace(/<\/?script\b[^>]*>/gi, '').trim() : '';
+    var usable = !!sheet && (!cut || (sheet.length >= (compact ? 1500 : 3000) && /:root\b/.test(sheet)));
+    if (!usable && !cut) { noReplay.add(input); throw { code: 'bad_shell' }; }
+    return { plan: plan, fonts: links.join('\n'), css: usable ? sheet : null, js: script, cut: cut };
   }
 
   async function writeSlides(nums, job, ch, nested) {
@@ -2369,14 +2442,20 @@ svg {
     try {
       text = await ask(fitted(function (f) { return batchPrompt(nums, ch, imgs, f.filter(function (x) { return x !== 'STYLE_PRESETS.md'; })); }), imgs, 'medium', job, null);
     } catch (e) {
-      if (e && e.code === 'truncated' && nums.length > 1) {      // too long for one reply: split the batch
-        var h = Math.ceil(nums.length / 2);
-        await writeSlides(nums.slice(0, h), job, ch, true);
-        await writeSlides(nums.slice(h), job, ch, true);
+      if (e && e.code === 'truncated') {                          // too long for one reply: keep the slides that finished
+        var kept = parseSlides(e.text || '', 'slides ' + nums.join(','), true);
+        nums.forEach(function (k) { if (kept[k]) claudeDeck.sections[k] = kept[k]; });
+        var left = nums.filter(function (k) { return !kept[k]; });
+        if (left.length && left.length < nums.length) await writeSlides(left, job, ch, true);
+        else if (left.length > 1) {                                 // none finished: split the batch
+          var h = Math.ceil(left.length / 2);
+          await writeSlides(left.slice(0, h), job, ch, true);
+          await writeSlides(left.slice(h), job, ch, true);
+        } else if (left.length) plainSlide(left[0]);
         if (!nested) { job.done++; progressTick(job); }
         return;
       }
-      if (e && (e.code === 'truncated' || e.code === 'refused' || e.code === 'empty_completion')) {
+      if (e && (e.code === 'refused' || e.code === 'empty_completion')) {
         nums.forEach(plainSlide);
         if (!nested) { job.done++; progressTick(job); }
         return;
@@ -2400,9 +2479,14 @@ svg {
     job.total = groups.length; job.done = 0;
     var ch = choices();
     await pool(groups, PARALLEL, job, async function (g) {
-      var imgs = attached(imagesOf(g));
-      var text = await ask(fitted(function (f) { return fixPrompt(g, bySlide, ch, imgs, f.filter(function (x) { return x !== 'STYLE_PRESETS.md'; })); }), imgs, 'medium', job, null);
-      var got = parseSlides(text, 'fix ' + g.join(',') + ' ' + Date.now());
+      var imgs = attached(imagesOf(g)), text, cut = false;
+      try {
+        text = await ask(fitted(function (f) { return fixPrompt(g, bySlide, ch, imgs, f.filter(function (x) { return x !== 'STYLE_PRESETS.md'; })); }), imgs, 'medium', job, null);
+      } catch (e) {                                               // cut short: use the slides that finished, keep the rest as they were
+        if (!e || e.code !== 'truncated') throw e;
+        text = e.text || ''; cut = true;
+      }
+      var got = parseSlides(text, 'fix ' + g.join(',') + ' ' + Date.now(), cut);
       g.forEach(function (k) {
         if (got[k]) { claudeDeck.sections[k] = got[k]; claudeDeck.plain = claudeDeck.plain.filter(function (x) { return x !== k; }); }
       });
@@ -2426,19 +2510,32 @@ svg {
     if (firstErr) throw firstErr;
   }
 
-  /* Claude's slide HTML → { slideNo: [section html, …] }, plus any scoped CSS. Parsed inertly in a <template>. */
-  function parseSlides(text, key) {
+  /* Claude's slide HTML → { slideNo: [section html, …] }, plus any scoped CSS. Parsed inertly in a <template>.
+     For a reply that was cut short (partial), only the slides before the last one it began are kept.
+     That slide is found in the raw text: the parser drops a start tag that was cut off. */
+  function parseSlides(text, key, partial) {
+    var src = stripFences(text), cutNo = -1;
+    if (partial) {
+      var re = /<section\b[^>]*?\bdata-slide\b/gi, m, at = -1;
+      while ((m = re.exec(src))) at = m.index;
+      if (at < 0) return {};
+      var num = /^<section\b[^>]*?\bdata-slide\s*=\s*["']?(\d+)["'\s>]/i.exec(src.slice(at));
+      cutNo = num ? +num[1] : 0;                        // 0: its number was cut off too
+      src = src.slice(0, at);
+    }
     var t = document.createElement('template');
-    t.innerHTML = stripFences(text);
-    var css = Array.prototype.map.call(t.content.querySelectorAll('style'), function (s) { return s.textContent; }).join('\n');
-    if (css.trim()) claudeDeck.css[key] = css;
-    var out = {};
+    t.innerHTML = src;
+    var out = {}, last = 0;
     Array.prototype.forEach.call(t.content.querySelectorAll('section.slide'), function (sec) {
       if (sec.parentElement && sec.parentElement.closest('section.slide')) return;
       sec.querySelectorAll('script').forEach(function (s) { s.remove(); });
       var k = parseInt(sec.getAttribute('data-slide'), 10);
-      if (k) (out[k] = out[k] || []).push(sec.outerHTML);
+      if (k) { (out[k] = out[k] || []).push(sec.outerHTML); last = k; }
     });
+    if (partial) delete out[cutNo || last];             // a slide split in two is only kept whole
+    if (partial && !Object.keys(out).length) return out;
+    var css = Array.prototype.map.call(t.content.querySelectorAll('style'), function (s) { return s.textContent; }).join('\n');
+    if (css.trim()) claudeDeck.css[key] = css;
     return out;
   }
 
@@ -2478,7 +2575,7 @@ svg {
       case 'prompt_too_large': return 'This PowerPoint has too much content for one request. Split it into two files and convert each.';
       case 'refused': return 'Claude declined to design this deck.';
       case 'bad_shell': return 'Claude’s design reply couldn’t be read. Click the button again to retry.';
-      case 'truncated': return 'Claude’s design reply was cut short. Try again, or pick “Reading-first” or a simpler style.';
+      case 'truncated': return 'Claude couldn’t fit the deck’s design into one reply, even a compact one. Click the button to try again, or pick one of the simpler presets.';
       case 'images_unavailable': case 'image_rejected': return 'Your slide images couldn’t be sent to Claude. Reload the page and try again.';
       case 'upstream_error': return 'The connection to Claude was interrupted. Click the button again; parts that already finished are reused.';
       default: return 'Something went wrong (' + ((e && e.code) || (e && e.message) || 'unknown') + '). Try again.';
@@ -2664,10 +2761,6 @@ svg {
     $('progress').hidden = true;
     status(msg, true);
     refresh();
-  }
-  function between(t, tag) {
-    var m = new RegExp('<' + tag + '>([\\s\\S]*?)<\\/' + tag + '>', 'i').exec(t || '');
-    return m ? m[1].trim() : null;
   }
   function stripFences(t) { return String(t).replace(/^\s*```[a-zA-Z]*\s*\n?/, '').replace(/\n?```\s*$/, ''); }
   function extractHTML(t) {
