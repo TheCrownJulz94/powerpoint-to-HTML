@@ -287,7 +287,7 @@ Output goes to `<deck>-check/`: `slide-NN.png`, `phone.png`, `overview.png` (con
 
 When converting PowerPoint files:
 
-**Quick path:** if the user wants a faithful conversion rather than a redesign, point them to [pptx-converter.html](pptx-converter.html): they open it in a browser, drop the `.pptx`, and download a finished deck (themes, slides panel and autoplay included). It cannot convert charts or SmartArt (it leaves a dashed box) and needs `.pptx`, not legacy `.ppt`. For a redesigned deck, follow the steps below.
+**Browser path:** users without Claude Code can use [pptx-converter.html](pptx-converter.html): they open it in a browser, paste an Anthropic API key, drop the `.pptx` and pick a style from a list; the page sends this skill's files and the extracted content to the Claude API and assembles the deck. It needs `.pptx`, not legacy `.ppt`. In Claude Code, follow the steps below instead.
 
 1. **Extract content** — Run `python scripts/extract-pptx.py <input.pptx> <output_dir>` (install python-pptx if needed: `pip install python-pptx`)
 2. **Confirm with user** — Present extracted slide titles, content summaries, and image counts
@@ -425,6 +425,6 @@ This captures each slide as a screenshot and combines them into a PDF. Perfect f
 | [html-template.md](html-template.md)               | HTML skeleton, runtime features, audit opt-outs, code quality        | Phase 3 (generation)      |
 | [animation-patterns.md](animation-patterns.md)     | CSS/JS animation snippets and effect-to-feeling guide                | Phase 3 (generation)      |
 | [scripts/extract-pptx.py](scripts/extract-pptx.py) | Python script for PPT content extraction                             | Phase 4 (conversion)      |
-| [pptx-converter.html](pptx-converter.html)         | Browser page: drop a .pptx, download a finished deck (no agent)      | Phase 4 quick path — point the user to it, never read it |
+| [pptx-converter.html](pptx-converter.html)         | Browser page: drop a .pptx, Claude (via API key) designs the deck from these skill files | Phase 4 browser path — point the user to it, never read it (it embeds the skill files) |
 | [scripts/deploy.sh](scripts/deploy.sh)             | Deploy slides to Vercel for instant sharing                          | Phase 6 (sharing)         |
 | [scripts/export-pdf.sh](scripts/export-pdf.sh)     | Export slides to PDF                                                 | Phase 6 (sharing)         |
